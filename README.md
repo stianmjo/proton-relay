@@ -2,9 +2,6 @@
 
 A minimal HTTP bridge that lets [External Secrets Operator](https://external-secrets.io) pull secrets from [Proton Pass](https://proton.me/pass) using the [Proton Pass CLI](https://protonpass.github.io/pass-cli/) and a scoped Personal Access Token (PAT).
 
-> **Why this exists**
-> ESO has no native Proton Pass provider ([upstream issue #5689](https://github.com/external-secrets/external-secrets/issues/5689)). This bridge fills the gap using ESO's built-in [Webhook provider](https://external-secrets.io/latest/provider/webhook/), which can call any HTTP endpoint that returns JSON.
-
 ---
 
 ## How it works
