@@ -46,11 +46,11 @@ pass-cli pat access grant \
   --role viewer
 ```
 
-### 3. Generate two random keys
+### 3. Generate a random bridge token
 
 ```sh
-# Run this twice — once for PROTON_PASS_ENCRYPTION_KEY, once for BRIDGE_TOKEN
 dd if=/dev/urandom bs=1 count=2048 2>/dev/null | sha256sum | awk '{print $1}'
+# → use as BRIDGE_TOKEN
 ```
 
 ### 4. Create the Kubernetes secret
@@ -59,8 +59,7 @@ dd if=/dev/urandom bs=1 count=2048 2>/dev/null | sha256sum | awk '{print $1}'
 kubectl create secret generic proton-relay \
   -n external-secrets \
   --from-literal=PROTON_PASS_PERSONAL_ACCESS_TOKEN="pst_xxxx...xxxx::TOKENKEY" \
-  --from-literal=PROTON_PASS_ENCRYPTION_KEY="<key-1>" \
-  --from-literal=BRIDGE_TOKEN="<key-2>"
+  --from-literal=BRIDGE_TOKEN="<your-bridge-token>"
 
 kubectl label secret proton-relay -n external-secrets external-secrets.io/type=webhook
 ```
@@ -142,7 +141,6 @@ curl -s -H "Authorization: Bearer <BRIDGE_TOKEN>" \
 | Variable | Required | Description |
 |---|---|---|
 | `PROTON_PASS_PERSONAL_ACCESS_TOKEN` | Yes | PAT from `pass-cli pat create` |
-| `PROTON_PASS_ENCRYPTION_KEY` | Yes | Random key for local session encryption |
 | `PROTON_PASS_VAULT` | Yes | Vault name the PAT has access to |
 | `BRIDGE_TOKEN` | Yes | Shared secret between ESO and the bridge |
 
@@ -173,4 +171,4 @@ kubectl rollout restart deploy/proton-relay -n external-secrets
 - PAT is scoped to a single vault with `viewer` role — read-only, no other vaults accessible
 - Every request to the bridge requires a valid `BRIDGE_TOKEN` bearer header
 - Secret values are never logged — only item URIs appear in logs
-- `PROTON_PASS_ENCRYPTION_KEY` encrypts the local CLI session only — Proton's E2E encryption is unaffected
+- Session encryption is handled internally by pass-cli using filesystem key storage — Proton's E2E encryption is unaffected

@@ -18,19 +18,16 @@ log = logging.getLogger(__name__)
 # ── Config ────────────────────────────────────────────────────────────────────
 
 PAT          = os.environ["PROTON_PASS_PERSONAL_ACCESS_TOKEN"]
-ENC_KEY      = os.environ["PROTON_PASS_ENCRYPTION_KEY"]
 VAULT        = os.environ["PROTON_PASS_VAULT"]
 BRIDGE_TOKEN = os.environ["BRIDGE_TOKEN"]
 
 log.info("Starting proton-relay")
 log.info("Vault: %s", VAULT)
-log.info("Key provider: %s", os.environ.get("PROTON_PASS_KEY_PROVIDER", "NOT SET — setting now"))
 
-# Ensure pass-cli uses env-based key storage for all subprocesses
-os.environ["PROTON_PASS_KEY_PROVIDER"]   = "env"
-os.environ["PROTON_PASS_ENCRYPTION_KEY"] = ENC_KEY
-
-log.info("PROTON_PASS_KEY_PROVIDER set to: %s", os.environ["PROTON_PASS_KEY_PROVIDER"])
+# Use filesystem key storage — required for containers (no kernel keyring access)
+# per https://protonpass.github.io/pass-cli/help/faq/
+os.environ["PROTON_PASS_KEY_PROVIDER"] = "fs"
+log.info("PROTON_PASS_KEY_PROVIDER set to: fs")
 
 # ── Session management ────────────────────────────────────────────────────────
 
@@ -66,28 +63,14 @@ def login() -> bool:
     return True
 
 
-def ensure_session() -> bool:
-    """
-    Verify session with pass-cli test.
-    If invalid, force logout to clear stale data and re-login.
-    """
-    if session_valid():
-        return True
-    log.warning("Session invalid — clearing stale session and re-authenticating…")
-    run(["logout", "--force"])
-    return login()
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info("=== proton-relay startup ===")
-    # Clear any stale session from a previous pod and login fresh
     log.info("Clearing any existing session before login…")
     run(["logout", "--force"])
     if not login():
         log.error("Initial login failed — exiting")
         sys.exit(1)
-    # Verify immediately after login
     if not session_valid():
         log.error("Session invalid immediately after login — exiting")
         sys.exit(1)
