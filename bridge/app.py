@@ -22,19 +22,16 @@ ENC_KEY      = os.environ["PROTON_PASS_ENCRYPTION_KEY"]
 VAULT        = os.environ["PROTON_PASS_VAULT"]
 BRIDGE_TOKEN = os.environ["BRIDGE_TOKEN"]
 
+# Set pass-cli env vars on the process itself so all subprocesses inherit them
+os.environ["PROTON_PASS_KEY_PROVIDER"]    = "env"
+os.environ["PROTON_PASS_ENCRYPTION_KEY"]  = ENC_KEY
+
 # ── Startup: authenticate pass-cli ───────────────────────────────────────────
 
 def login():
     log.info("Authenticating pass-cli with PAT…")
-    env = {
-        **os.environ,
-        "PROTON_PASS_PERSONAL_ACCESS_TOKEN": PAT,
-        "PROTON_PASS_KEY_PROVIDER": "env",
-        "PROTON_PASS_ENCRYPTION_KEY": ENC_KEY,
-    }
     result = subprocess.run(
         ["pass-cli", "login"],
-        env=env,
         capture_output=True,
         text=True,
     )
@@ -65,29 +62,19 @@ def verify_token(creds: HTTPAuthorizationCredentials = Security(bearer)):
 
 def fetch_secret(item: str, field: str) -> str:
     """
-    Fetch full item JSON (no field in URI) and extract the field ourselves.
-    pass-cli returns a raw scalar when the field is included in the URI,
-    which breaks JSON parsing.
+    Fetch full item JSON and extract the field ourselves.
     """
     uri = f"pass://{VAULT}/{item}"
     log.info("Fetching %s field=%s", uri, field)
 
-    env = {
-        **os.environ,
-        "PROTON_PASS_KEY_PROVIDER": "env",
-        "PROTON_PASS_ENCRYPTION_KEY": ENC_KEY,
-    }
     result = subprocess.run(
         ["pass-cli", "item", "view", uri, "--output", "json"],
-        env=env,
         capture_output=True,
         text=True,
     )
     if result.returncode != 0:
         log.error("pass-cli error for %s:\n%s", uri, result.stderr)
         raise HTTPException(status_code=404, detail=f"Secret not found: {uri}")
-
-    log.debug("pass-cli raw output: %s", result.stdout[:200])
 
     try:
         data = json.loads(result.stdout)
@@ -116,7 +103,7 @@ def _extract_field(data: dict, field: str) -> str:
         if ef.get("fieldName") == field:
             return str(ef["data"]["content"])
 
-    raise ValueError(f"Field '{field}' not found in item. Available keys: {list(data.keys())}")
+    raise ValueError(f"Field '{field}' not found. Available keys: {list(data.keys())}")
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
