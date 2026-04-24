@@ -1,11 +1,15 @@
 FROM python:3.12-slim
 
-# Install pass-cli
-ARG PASS_CLI_VERSION=latest
-RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
+# Install pass-cli via direct binary download
+ENV PASS_CLI_VERSION=2.0.0
+ENV PASS_CLI_HASH=7dc49f969682ec6508e2e9db510d54fc61b4c183076abdaa0e97232f8d0b3326
 
-RUN curl -fsSL https://proton.me/download/pass-cli/install.sh | sh
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && \
+    rm -rf /var/lib/apt/lists/* && \
+    curl -fsSL "https://proton.me/download/pass-cli/${PASS_CLI_VERSION}/pass-cli-linux-x86_64" \
+         -o /usr/local/bin/pass-cli && \
+    echo "${PASS_CLI_HASH}  /usr/local/bin/pass-cli" | sha256sum -c - && \
+    chmod +x /usr/local/bin/pass-cli
 
 # Install Python deps
 WORKDIR /app
