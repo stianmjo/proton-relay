@@ -1,0 +1,68 @@
+name: Update pass-cli
+
+on:
+  schedule:
+    - cron: "0 8 * * 1"  # Every Monday at 08:00 UTC
+  workflow_dispatch:      # Allow manual trigger
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check for new pass-cli version
+        id: check
+        run: |
+          # Fetch latest version info
+          VERSIONS=$(curl -fsSL https://proton.me/download/pass-cli/versions.json)
+
+          LATEST_VERSION=$(echo "$VERSIONS" | jq -r '.passCliVersions.version')
+          LATEST_HASH=$(echo "$VERSIONS" | jq -r '.passCliVersions.urls.linux.x86_64.hash')
+
+          # Read current version from Dockerfile
+          CURRENT_VERSION=$(grep 'ENV PASS_CLI_VERSION=' bridge/Dockerfile | cut -d= -f2)
+
+          echo "Current: $CURRENT_VERSION"
+          echo "Latest:  $LATEST_VERSION"
+
+          if [ "$CURRENT_VERSION" = "$LATEST_VERSION" ]; then
+            echo "Already up to date"
+            echo "updated=false" >> $GITHUB_OUTPUT
+          else
+            echo "Update available"
+            echo "updated=true" >> $GITHUB_OUTPUT
+            echo "latest_version=$LATEST_VERSION" >> $GITHUB_OUTPUT
+            echo "latest_hash=$LATEST_HASH" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update Dockerfile
+        if: steps.check.outputs.updated == 'true'
+        run: |
+          VERSION=${{ steps.check.outputs.latest_version }}
+          HASH=${{ steps.check.outputs.latest_hash }}
+
+          sed -i "s|ENV PASS_CLI_VERSION=.*|ENV PASS_CLI_VERSION=${VERSION}|" bridge/Dockerfile
+          sed -i "s|ENV PASS_CLI_HASH=.*|ENV PASS_CLI_HASH=${HASH}|" bridge/Dockerfile
+
+      - name: Open PR
+        if: steps.check.outputs.updated == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: update/pass-cli-${{ steps.check.outputs.latest_version }}
+          commit-message: "chore: update pass-cli to ${{ steps.check.outputs.latest_version }}"
+          title: "chore: update pass-cli to ${{ steps.check.outputs.latest_version }}"
+          body: |
+            Automated update of `pass-cli` to `${{ steps.check.outputs.latest_version }}`.
+
+            - Version: `${{ steps.check.outputs.latest_version }}`
+            - SHA256: `${{ steps.check.outputs.latest_hash }}`
+
+            Source: https://proton.me/download/pass-cli/versions.json
+          labels: dependencies
