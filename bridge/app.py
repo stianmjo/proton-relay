@@ -22,24 +22,76 @@ ENC_KEY      = os.environ["PROTON_PASS_ENCRYPTION_KEY"]
 VAULT        = os.environ["PROTON_PASS_VAULT"]
 BRIDGE_TOKEN = os.environ["BRIDGE_TOKEN"]
 
-# Set pass-cli env vars on the process so all subprocesses inherit them
+log.info("Starting proton-relay")
+log.info("Vault: %s", VAULT)
+log.info("Key provider: %s", os.environ.get("PROTON_PASS_KEY_PROVIDER", "NOT SET — setting now"))
+
+# Ensure pass-cli uses env-based key storage for all subprocesses
 os.environ["PROTON_PASS_KEY_PROVIDER"]   = "env"
 os.environ["PROTON_PASS_ENCRYPTION_KEY"] = ENC_KEY
 
-# ── Startup ───────────────────────────────────────────────────────────────────
+log.info("PROTON_PASS_KEY_PROVIDER set to: %s", os.environ["PROTON_PASS_KEY_PROVIDER"])
 
-def login():
-    log.info("Authenticating pass-cli with PAT…")
-    result = subprocess.run(["pass-cli", "login"], capture_output=True, text=True)
+# ── Session management ────────────────────────────────────────────────────────
+
+def run(args: list) -> subprocess.CompletedProcess:
+    """Run a pass-cli command and log the result."""
+    cmd = ["pass-cli"] + args
+    log.debug("Running: %s", " ".join(cmd))
+    result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        log.error("pass-cli login failed:\n%s", result.stderr)
-        sys.exit(1)
-    log.info("pass-cli login successful")
+        log.warning("pass-cli %s failed (exit %d):\n%s", args[0], result.returncode, result.stderr.strip())
+    return result
+
+
+def session_valid() -> bool:
+    """Use pass-cli test to check if the current session is valid."""
+    log.info("Checking session validity (pass-cli test)…")
+    result = run(["test"])
+    if result.returncode == 0:
+        log.info("Session is valid")
+        return True
+    log.warning("Session invalid: %s", result.stderr.strip())
+    return False
+
+
+def login() -> bool:
+    """Login with PAT. Returns True on success."""
+    log.info("Authenticating with PAT…")
+    result = run(["login"])
+    if result.returncode != 0:
+        log.error("Login failed: %s", result.stderr.strip())
+        return False
+    log.info("Login successful: %s", result.stdout.strip())
+    return True
+
+
+def ensure_session() -> bool:
+    """
+    Verify session with pass-cli test.
+    If invalid, force logout to clear stale data and re-login.
+    """
+    if session_valid():
+        return True
+    log.warning("Session invalid — clearing stale session and re-authenticating…")
+    run(["logout", "--force"])
+    return login()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    login()
+    log.info("=== proton-relay startup ===")
+    # Clear any stale session from a previous pod and login fresh
+    log.info("Clearing any existing session before login…")
+    run(["logout", "--force"])
+    if not login():
+        log.error("Initial login failed — exiting")
+        sys.exit(1)
+    # Verify immediately after login
+    if not session_valid():
+        log.error("Session invalid immediately after login — exiting")
+        sys.exit(1)
+    log.info("=== proton-relay ready ===")
     yield
 
 
@@ -57,71 +109,71 @@ def verify_token(creds: HTTPAuthorizationCredentials = Security(bearer)):
 # ── pass-cli wrapper ──────────────────────────────────────────────────────────
 
 def get_item_json(item: str) -> dict:
+    """
+    Fetch full item JSON from Proton Pass.
+    On session failure: re-authenticate via pass-cli test and retry once.
+    """
     uri = f"pass://{VAULT}/{item}"
-    result = subprocess.run(
-        ["pass-cli", "item", "view", uri, "--output", "json"],
-        capture_output=True,
-        text=True,
-    )
+    log.info("Fetching item: %s", uri)
+
+    result = run(["item", "view", uri, "--output", "json"])
+
     if result.returncode != 0:
-        log.error("pass-cli error for %s:\n%s", uri, result.stderr)
-        raise HTTPException(status_code=404, detail=f"Item not found: {item}")
+        log.warning("Item fetch failed — checking session…")
+        if not session_valid():
+            log.warning("Session expired — re-authenticating…")
+            run(["logout", "--force"])
+            if not login():
+                log.error("Re-authentication failed")
+                raise HTTPException(status_code=503, detail="Failed to re-authenticate with Proton Pass")
+            log.info("Re-authenticated — retrying item fetch…")
+            result = run(["item", "view", uri, "--output", "json"])
+            if result.returncode != 0:
+                log.error("Item fetch failed after re-auth: %s", result.stderr.strip())
+                raise HTTPException(status_code=404, detail=f"Item not found: {item}")
+        else:
+            log.error("Session valid but item fetch failed: %s", result.stderr.strip())
+            raise HTTPException(status_code=404, detail=f"Item not found: {item}")
+
+    log.info("Item fetched successfully: %s", uri)
     return json.loads(result.stdout)
 
 
 # ── Field extraction ──────────────────────────────────────────────────────────
 
 def _get_extra_field(extra_fields: list, field: str) -> str | None:
-    """
-    Custom/extra fields — present on all item types.
-    JSON: extra_fields[n].name + extra_fields[n].content.{Hidden|Text|Totp}
-    """
     for ef in extra_fields:
         if ef.get("name") == field:
             fc = ef.get("content", {})
-            # Hidden = secret value, Text = plaintext, Totp = TOTP URI
             value = fc.get("Hidden") or fc.get("Text") or fc.get("Totp")
             if value is not None:
                 return str(value)
     return None
 
 
-def _get_login_field(login: dict, field: str) -> str | None:
-    """
-    Login item standard fields.
-    JSON: item.content.content.Login.{username|password|email|urls|totp|note}
-    """
+def _get_login_field(login_data: dict, field: str) -> str | None:
     mapping = {
-        "username":  login.get("username"),
-        "password":  login.get("password"),
-        "email":     login.get("email"),
-        "totp":      login.get("totp"),
-        # urls is a list — return first entry for simplicity
-        "url":       (login.get("urls") or [None])[0],
+        "username": login_data.get("username"),
+        "password": login_data.get("password"),
+        "email":    login_data.get("email"),
+        "totp":     login_data.get("totp"),
+        "url":      (login_data.get("urls") or [None])[0],
     }
     return str(mapping[field]) if field in mapping and mapping[field] is not None else None
 
 
 def _get_card_field(card: dict, field: str) -> str | None:
-    """
-    Credit card item fields.
-    JSON: item.content.content.CreditCard.{cardholder_name|number|expiration_date|verif_number|pin}
-    """
     mapping = {
-        "cardholder_name":   card.get("cardholder_name"),
-        "number":            card.get("number"),
-        "expiration_date":   card.get("expiration_date"),
-        "verif_number":      card.get("verif_number"),   # CVV
-        "pin":               card.get("pin"),
+        "cardholder_name":  card.get("cardholder_name"),
+        "number":           card.get("number"),
+        "expiration_date":  card.get("expiration_date"),
+        "verif_number":     card.get("verif_number"),
+        "pin":              card.get("pin"),
     }
     return str(mapping[field]) if field in mapping and mapping[field] is not None else None
 
 
 def _get_wifi_field(wifi: dict, field: str) -> str | None:
-    """
-    Wifi item fields.
-    JSON: item.content.content.Wifi.{ssid|password}
-    """
     mapping = {
         "ssid":     wifi.get("ssid"),
         "password": wifi.get("password"),
@@ -135,19 +187,19 @@ def extract_field(data: dict, field: str) -> str:
     note     = content.get("note", "")
     type_map = content.get("content", {})
     extra    = content.get("extra_fields", [])
+    item_type = list(type_map.keys())[0] if type_map else "Unknown"
 
-    # ── Common fields ─────────────────────────────────────────────────────────
+    log.info("Extracting field '%s' from %s item '%s'", field, item_type, title)
+
     if field == "title":
         return title
     if field == "note":
         return note
 
-    # ── Extra / custom fields (all item types) ─────────────────────────────
     value = _get_extra_field(extra, field)
     if value is not None:
         return value
 
-    # ── Type-specific standard fields ─────────────────────────────────────
     if "Login" in type_map:
         value = _get_login_field(type_map["Login"], field)
         if value is not None:
@@ -163,12 +215,8 @@ def extract_field(data: dict, field: str) -> str:
         if value is not None:
             return value
 
-    # Note items: the note text is already covered by "note" above.
-    # SSH key items expose the key via extra_fields in practice.
-
-    # ── Nothing found ─────────────────────────────────────────────────────
     available_extra = [ef.get("name") for ef in extra]
-    item_type = list(type_map.keys())[0] if type_map else "Unknown"
+    log.error("Field '%s' not found in %s item '%s'. Available: %s", field, item_type, title, available_extra)
     raise HTTPException(
         status_code=404,
         detail=f"Field '{field}' not found in {item_type} item '{title}'. "
@@ -189,9 +237,7 @@ def get_secret(
     field: str,
     creds: HTTPAuthorizationCredentials = Security(bearer),
 ):
-    """Fetch a single field from a Proton Pass item."""
     verify_token(creds)
-    log.info("Fetching pass://%s/%s field=%s", VAULT, item, field)
     data  = get_item_json(item)
     value = extract_field(data, field)
     return {"value": value}
@@ -202,27 +248,21 @@ def list_fields(
     item: str,
     creds: HTTPAuthorizationCredentials = Security(bearer),
 ):
-    """
-    Discovery endpoint — lists all available fields for an item.
-    Useful for debugging ExternalSecret key names.
-    """
     verify_token(creds)
     log.info("Listing fields for pass://%s/%s", VAULT, item)
-    data    = get_item_json(item)
-    content = data.get("item", {}).get("content", {})
+    data     = get_item_json(item)
+    content  = data.get("item", {}).get("content", {})
     type_map = content.get("content", {})
-    extra   = content.get("extra_fields", [])
+    extra    = content.get("extra_fields", [])
     item_type = list(type_map.keys())[0] if type_map else "Unknown"
 
     fields = ["title", "note"]
-
     if "Login" in type_map:
         fields += ["username", "password", "email", "url", "totp"]
     if "CreditCard" in type_map:
         fields += ["cardholder_name", "number", "expiration_date", "verif_number", "pin"]
     if "Wifi" in type_map:
         fields += ["ssid", "password"]
-
     fields += [ef.get("name") for ef in extra if ef.get("name")]
 
     return {"item": item, "type": item_type, "fields": fields}
