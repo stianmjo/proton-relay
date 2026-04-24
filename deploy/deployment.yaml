@@ -10,19 +10,25 @@ spec:
   selector:
     matchLabels:
       app: proton-relay
+  strategy:
+    type: Recreate
   template:
     metadata:
       labels:
         app: proton-relay
     spec:
       containers:
-        - name: bridge
+        - name: proton-relay
           image: ghcr.io/stianmjo/proton-relay:latest
           ports:
             - containerPort: 8080
           env:
             - name: PROTON_PASS_VAULT
-              value: "Kubernetes"   # must match the vault name the PAT was granted access to
+              value: "Kubernetes"
+            - name: PROTON_PASS_KEY_PROVIDER
+              value: "env"
+            - name: TZ
+              value: "Europe/Oslo"
           envFrom:
             - secretRef:
                 name: proton-relay
@@ -30,13 +36,13 @@ spec:
             httpGet:
               path: /health
               port: 8080
-            initialDelaySeconds: 10
+            initialDelaySeconds: 15
             periodSeconds: 30
           readinessProbe:
             httpGet:
               path: /health
               port: 8080
-            initialDelaySeconds: 10
+            initialDelaySeconds: 15
             periodSeconds: 10
           resources:
             requests:
