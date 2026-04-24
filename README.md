@@ -36,14 +36,14 @@ On your local machine, logged in to `pass-cli`:
 
 ```sh
 # Create a token valid for 1 year (maximum recommended for homelab)
-pass-cli pat create --name "nebulahvelvet-eso" --expiration 1y
+pass-cli pat create --name "name-of-token" --expiration 1y
 # Output:
 # PROTON_PASS_PERSONAL_ACCESS_TOKEN=pst_xxxx...xxxx::TOKENKEY
 #                                    ^^^ save this
 
 # Grant the token read-only access to your secrets vault
 pass-cli pat access grant \
-  --pat-name "nebulahvelvet-eso" \
+  --pat-name "name-of-token" \
   --vault-name "Kubernetes" \
   --role viewer
 ```
