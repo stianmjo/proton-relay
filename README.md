@@ -2,7 +2,7 @@
 
 > In Star Trek, a proton relay is a conduit that transfers energy between systems. This one transfers secrets between Proton Pass and your Kubernetes cluster.
 
-A lightweight bridge that lets [External Secrets Operator](https://external-secrets.io) pull secrets from [Proton Pass](https://proton.me/pass) vaults into Kubernetes Secrets — using the Proton Pass CLI and a scoped Personal Access Token.
+A lightweight bridge that lets [External Secrets Operator](https://external-secrets.io) pull secrets from [Proton Pass](https://proton.me/pass) vaults into Kubernetes Secrets, using the Proton Pass CLI and a scoped Personal Access Token.
 
 ---
 
