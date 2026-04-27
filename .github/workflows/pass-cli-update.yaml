@@ -11,10 +11,12 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true  # for peter-evans/create-pull-request
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Check for new pass-cli version
         id: check
