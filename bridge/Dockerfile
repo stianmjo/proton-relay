@@ -1,8 +1,8 @@
 FROM python:3.12-slim
 
 # Install pass-cli via direct binary download
-ENV PASS_CLI_VERSION=2.1.3
-ENV PASS_CLI_HASH=dbfbffe1c2077f9d28d86eb2c600ae9db1a004c604ec2670a40e624f6ae9047a
+ENV PASS_CLI_VERSION=2.2.2
+ENV PASS_CLI_HASH=65bf75195bfd0fe8d9660144c837466b7ee9195d38e56e3557d5ee6439c5f751
 
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && \
     rm -rf /var/lib/apt/lists/* && \
@@ -11,14 +11,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
     echo "${PASS_CLI_HASH}  /usr/local/bin/pass-cli" | sha256sum -c - && \
     chmod +x /usr/local/bin/pass-cli
 
-# Install Python deps
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app.py .
 
-# pass-cli needs a writable home for session data
 RUN useradd -m bridge
 USER bridge
 ENV HOME=/home/bridge
