@@ -42,9 +42,9 @@ def run(args: list) -> subprocess.CompletedProcess:
 
 
 def session_valid() -> bool:
-    """Use pass-cli test to check if the current session is valid."""
-    log.info("Checking session validity (pass-cli test)…")
-    result = run(["test"])
+    """Use pass-cli info to check if the current session is valid."""
+    log.info("Checking session validity (pass-cli info)…")
+    result = run(["info"])
     if result.returncode == 0:
         log.info("Session is valid")
         return True
@@ -94,7 +94,7 @@ def verify_token(creds: HTTPAuthorizationCredentials = Security(bearer)):
 def get_item_json(item: str) -> dict:
     """
     Fetch full item JSON from Proton Pass.
-    On session failure: re-authenticate via pass-cli test and retry once.
+    On session failure: re-authenticate via pass-cli info and retry once.
     """
     uri = f"pass://{VAULT}/{item}"
     log.info("Fetching item: %s", uri)
