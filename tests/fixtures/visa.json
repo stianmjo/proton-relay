@@ -1,0 +1,28 @@
+{
+  "item": {
+    "id": "item_5",
+    "share_id": "share_homelab",
+    "vault_id": "vault_homelab",
+    "content": {
+      "title": "visa",
+      "note": "",
+      "item_uuid": "uuid-5",
+      "content": {
+        "CreditCard": {
+          "cardholder_name": "M J",
+          "card_type": "Unspecified",
+          "number": "4111111111111111",
+          "verification_number": "123",
+          "expiration_date": "2030-01",
+          "pin": "0000"
+        }
+      },
+      "extra_fields": []
+    },
+    "state": "Active",
+    "flags": [],
+    "create_time": "2026-09-21T14:13:20",
+    "modify_time": "2026-09-21T14:13:20"
+  },
+  "attachments": []
+}

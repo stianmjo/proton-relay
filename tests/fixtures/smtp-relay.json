@@ -1,0 +1,62 @@
+{
+  "item": {
+    "id": "item_1",
+    "share_id": "share_homelab",
+    "vault_id": "vault_homelab",
+    "content": {
+      "title": "smtp-relay",
+      "note": "Proton SMTP submission token",
+      "item_uuid": "uuid-1",
+      "content": {
+        "Login": {
+          "email": "noreply@nebulahvelvet.no",
+          "username": "noreply@nebulahvelvet.no",
+          "password": "login-password-VALUE",
+          "urls": [
+            "https://smtp.protonmail.ch",
+            "https://account.proton.me"
+          ],
+          "totp_uri": "otpauth://totp/smtp?secret=JBSWY3DPEHPK3PXP",
+          "passkeys": []
+        }
+      },
+      "extra_fields": [
+        {
+          "name": "api_key",
+          "content": {
+            "Hidden": "sk-live-1234"
+          }
+        },
+        {
+          "name": "region",
+          "content": {
+            "Text": "eu-north-1"
+          }
+        },
+        {
+          "name": "backup_totp",
+          "content": {
+            "Totp": "otpauth://totp/backup?secret=ABC"
+          }
+        },
+        {
+          "name": "rotated_at",
+          "content": {
+            "Timestamp": 1790000000
+          }
+        },
+        {
+          "name": "empty_custom",
+          "content": {
+            "Hidden": ""
+          }
+        }
+      ]
+    },
+    "state": "Active",
+    "flags": [],
+    "create_time": "2026-09-21T14:13:20",
+    "modify_time": "2026-09-21T14:13:20"
+  },
+  "attachments": []
+}

@@ -1,0 +1,76 @@
+{
+  "item": {
+    "id": "item_3",
+    "share_id": "share_homelab",
+    "vault_id": "vault_homelab",
+    "content": {
+      "title": "cloudflare-api",
+      "note": "DNS-01 token for cert-manager",
+      "item_uuid": "uuid-3",
+      "content": {
+        "Custom": {
+          "sections": [
+            {
+              "section_name": "API",
+              "section_fields": [
+                {
+                  "name": "token",
+                  "content": {
+                    "Hidden": "cf-api-token"
+                  }
+                },
+                {
+                  "name": "account_id",
+                  "content": {
+                    "Text": "acc-42"
+                  }
+                }
+              ]
+            },
+            {
+              "section_name": "Zone",
+              "section_fields": [
+                {
+                  "name": "zone_id",
+                  "content": {
+                    "Text": "zone-7"
+                  }
+                },
+                {
+                  "name": "token",
+                  "content": {
+                    "Hidden": "cf-zone-token"
+                  }
+                }
+              ]
+            },
+            {
+              "section_name": "db.prod",
+              "section_fields": [
+                {
+                  "name": "pass.word",
+                  "content": {
+                    "Hidden": "dotted-names"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "extra_fields": [
+        {
+          "name": "env",
+          "content": {
+            "Text": "prod"
+          }
+        }
+      ]
+    },
+    "state": "Active",
+    "flags": [],
+    "create_time": "2026-09-21T14:13:20",
+    "modify_time": "2026-09-21T14:13:20"
+  },
+  "attachments": []
+}

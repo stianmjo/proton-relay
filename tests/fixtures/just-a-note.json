@@ -1,0 +1,21 @@
+{
+  "item": {
+    "id": "item_4",
+    "share_id": "share_homelab",
+    "vault_id": "vault_homelab",
+    "content": {
+      "title": "just-a-note",
+      "note": "multi\nline\nnote",
+      "item_uuid": "uuid-4",
+      "content": {
+        "Note": null
+      },
+      "extra_fields": []
+    },
+    "state": "Active",
+    "flags": [],
+    "create_time": "2026-09-21T14:13:20",
+    "modify_time": "2026-09-21T14:13:20"
+  },
+  "attachments": []
+}

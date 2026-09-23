@@ -1,0 +1,26 @@
+{
+  "item": {
+    "id": "item_6",
+    "share_id": "share_homelab",
+    "vault_id": "vault_homelab",
+    "content": {
+      "title": "home-wifi",
+      "note": "",
+      "item_uuid": "uuid-6",
+      "content": {
+        "Wifi": {
+          "ssid": "nebula",
+          "password": "wifi-pw",
+          "security": "UnspecifiedWifiSecurity",
+          "sections": []
+        }
+      },
+      "extra_fields": []
+    },
+    "state": "Active",
+    "flags": [],
+    "create_time": "2026-09-21T14:13:20",
+    "modify_time": "2026-09-21T14:13:20"
+  },
+  "attachments": []
+}
