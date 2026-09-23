@@ -37,6 +37,8 @@ unset PAT
 kubectl label secret proton-relay -n external-secrets external-secrets.io/type=webhook
 ```
 
+`deploy/secret.yaml.example` shows the expected shape. It is deliberately not a `.yaml` file, so `kubectl apply -f deploy/` can never overwrite the real Secret with placeholders.
+
 **4. Deploy:**
 
 ```sh
@@ -135,6 +137,8 @@ Errors: `401` bad bearer · `403` item type not served · `404` item or field no
 
 **Session directory.** The session is disposable — the relay logs out and back in on every start. `deploy/deployment.yaml` mounts an `emptyDir` at `/session` and points `PROTON_PASS_SESSION_DIR` at it. pass-cli 2.4+ refuses a symlinked session directory or one readable by group/others. The relay tightens permissions at startup and fails fast on symlinks, so never mount the session directory from a Secret or ConfigMap.
 
+**Filesystem.** The container runs as uid 1000 with a read-only root filesystem. `/session` and `/tmp` (both `emptyDir`) are the only writable paths; anything new that needs to write gets its own `emptyDir`.
+
 **Probes.** Liveness → `/health`, readiness → `/ready`.
 
 **Throughput.** pass-cli calls run one at a time: concurrent processes on one session race Proton's rotating refresh token and sign each other out. Each uncached lookup lists and decrypts the whole vault, so keep the vault small and the cache on.
@@ -163,6 +167,14 @@ kubectl rollout restart deploy/proton-relay -n external-secrets
 - Responses carry `Cache-Control: no-store`; OpenAPI docs are disabled
 - Values are held in memory for at most `CACHE_TTL_SECONDS`
 - pass-cli uses filesystem key storage inside the container; Proton's E2E encryption is unaffected
+- Pod runs as non-root (uid 1000) with a read-only root filesystem, all capabilities dropped, no privilege escalation, `RuntimeDefault` seccomp, and no service-account token
+
+## Updating pass-cli
+
+1. The scheduled `pass-cli-update` workflow opens a PR bumping `PASS_CLI_VERSION` and `PASS_CLI_HASH` in `bridge/Dockerfile`.
+2. Click **Approve workflows to run** on the PR — the suite runs against the new binary.
+3. Review the pass-cli changelog for breaking changes, then merge.
+4. Tag and publish a release — patch bump for a pass-cli-only update, minor/major if relay behaviour changes. The release runs the tests again, then builds and pushes the image.
 
 ## Development
 
