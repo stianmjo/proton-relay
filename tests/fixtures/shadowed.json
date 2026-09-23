@@ -1,0 +1,35 @@
+{
+  "item": {
+    "id": "item_2",
+    "share_id": "share_homelab",
+    "vault_id": "vault_homelab",
+    "content": {
+      "title": "shadowed",
+      "note": "",
+      "item_uuid": "uuid-2",
+      "content": {
+        "Login": {
+          "email": "",
+          "username": "svc",
+          "password": "real-login-pw",
+          "urls": [],
+          "totp_uri": "",
+          "passkeys": []
+        }
+      },
+      "extra_fields": [
+        {
+          "name": "Password",
+          "content": {
+            "Hidden": "extra-field-wins"
+          }
+        }
+      ]
+    },
+    "state": "Active",
+    "flags": [],
+    "create_time": "2026-09-21T14:13:20",
+    "modify_time": "2026-09-21T14:13:20"
+  },
+  "attachments": []
+}

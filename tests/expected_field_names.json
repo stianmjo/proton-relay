@@ -1,0 +1,54 @@
+{
+  "cloudflare-api": [
+    "title",
+    "note",
+    "env",
+    "API.token",
+    "API.account_id",
+    "Zone.zone_id",
+    "Zone.token",
+    "db.prod.pass.word"
+  ],
+  "home-wifi": [
+    "title",
+    "ssid",
+    "password",
+    "security"
+  ],
+  "just-a-note": [
+    "title",
+    "note"
+  ],
+  "shadowed": [
+    "title",
+    "Password",
+    "username",
+    "password"
+  ],
+  "smtp-relay": [
+    "title",
+    "note",
+    "api_key",
+    "region",
+    "backup_totp",
+    "rotated_at",
+    "empty_custom",
+    "email",
+    "username",
+    "password",
+    "totp",
+    "totp_uri",
+    "urls"
+  ],
+  "visa": [
+    "title",
+    "cardholder_name",
+    "card_type",
+    "number",
+    "verification_number",
+    "cvv",
+    "cvc",
+    "expiration_date",
+    "pin"
+  ]
+}
