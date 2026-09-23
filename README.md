@@ -76,6 +76,8 @@ spec:
         key: "postgres/password"
 ```
 
+A commented version with every field type is in `deploy/externalsecret.yaml.example`.
+
 Keep item titles free of `/` and spaces — the title is a URL path segment.
 
 ### Item types
