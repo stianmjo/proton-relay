@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -295,6 +296,19 @@ def test_concurrent_burst_old_relay_races(mock_env, tmp_path):
     assert overlaps > 0   # concurrent pass-cli processes on one session
 
 
+def _real_version():
+    try:
+        out = subprocess.run([str(REAL_BIN), "--version"], capture_output=True, text=True, timeout=10).stdout
+    except OSError:
+        return None
+    m = re.search(r"(\d+)\.(\d+)\.(\d+)", out)
+    return tuple(map(int, m.groups())) if m else None
+
+
+NEEDS_24 = pytest.mark.skipif((_real_version() or (0,)) < (2, 4, 0),
+                              reason="pass-cli on PATH is < 2.4.0 (no session-dir permission check)")
+
+
 # ── 9. Real pass-cli 2.4.1 binary ────────────────────────────────────────────
 
 @pytest.fixture
@@ -319,6 +333,7 @@ def real_env(tmp_path, monkeypatch):
     return sess
 
 
+@NEEDS_24
 def test_real_binary_rejects_loose_session_dir_until_relay_fixes_it(real_env):
     import conftest
     mod = conftest.load("app")

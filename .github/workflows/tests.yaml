@@ -1,0 +1,46 @@
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"   # matches python:3.12-slim in the image
+          cache: pip
+          cache-dependency-path: |
+            bridge/requirements.txt
+            requirements-dev.txt
+
+      # Same binary the image ships, so bump PRs run the real-binary tests against the new version.
+      - name: Install pass-cli pinned in the Dockerfile
+        run: |
+          V=$(sed -n 's/^ENV PASS_CLI_VERSION=//p' bridge/Dockerfile | tr -d '[:space:]')
+          H=$(sed -n 's/^ENV PASS_CLI_HASH=//p' bridge/Dockerfile | tr -d '[:space:]')
+          if [ -z "$V" ] || [ -z "$H" ]; then
+            echo "::error::PASS_CLI_VERSION / PASS_CLI_HASH not found in bridge/Dockerfile"; exit 1
+          fi
+          curl -fsSLo /tmp/pass-cli "https://github.com/protonpass/pass-cli/releases/download/${V}/pass-cli-linux-x86_64"
+          echo "${H}  /tmp/pass-cli" | sha256sum -c -
+          sudo install -m 0755 /tmp/pass-cli /usr/local/bin/pass-cli
+          pass-cli --version
+
+      - name: Install Python dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: pytest tests -q -rs
