@@ -133,7 +133,7 @@ Errors: `401` bad bearer · `403` item type not served · `404` item or field no
 
 ## Operations
 
-**Session directory.** The session is disposable — the relay logs out and back in on every start. Leave it on the container filesystem, or on an `emptyDir` if the root filesystem is read-only. pass-cli 2.4+ refuses a symlinked session directory or one readable by group/others. The relay tightens permissions at startup and fails fast on symlinks, so never mount the session directory from a Secret or ConfigMap.
+**Session directory.** The session is disposable — the relay logs out and back in on every start. `deploy/deployment.yaml` mounts an `emptyDir` at `/session` and points `PROTON_PASS_SESSION_DIR` at it. pass-cli 2.4+ refuses a symlinked session directory or one readable by group/others. The relay tightens permissions at startup and fails fast on symlinks, so never mount the session directory from a Secret or ConfigMap.
 
 **Probes.** Liveness → `/health`, readiness → `/ready`.
 
@@ -168,8 +168,10 @@ kubectl rollout restart deploy/proton-relay -n external-secrets
 
 ```sh
 python3 -m venv .venv && source .venv/bin/activate
-pip install -r bridge/requirements.txt pytest httpx
+pip install -r requirements-dev.txt
 pytest tests -q
 ```
 
 The suite runs against a mock pass-cli and needs no PAT or network. Fixtures were generated from pass-cli 2.4.1's own data models, and lookups are checked against pass-cli's own resolver. Real-binary tests run when `pass-cli` is on `PATH` (or `PASS_CLI_REAL_BIN` is set), each in a throwaway session directory, so your personal session is never touched.
+
+CI (`.github/workflows/tests.yaml`) runs the same suite on every pull request and before each release build, with the pass-cli version pinned in `bridge/Dockerfile`. Pull requests opened by the update workflow need **Approve workflows to run** once.
