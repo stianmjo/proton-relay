@@ -1,8 +1,10 @@
 name: Update pass-cli
+
 on:
   schedule:
     - cron: "0 8 * * 1"  # Every Monday at 08:00 UTC
   workflow_dispatch:      # Allow manual trigger
+
 jobs:
   update:
     runs-on: ubuntu-latest
@@ -18,32 +20,51 @@ jobs:
       - name: Check for new pass-cli version
         id: check
         run: |
+          set -euo pipefail
           VERSIONS=$(curl -fsSL https://proton.me/download/pass-cli/versions.json)
-          LATEST_VERSION=$(echo "$VERSIONS" | jq -r '.passCliVersions.version')
-          LATEST_HASH=$(echo "$VERSIONS" | jq -r '.passCliVersions.urls.linux.x86_64.hash')
-          CURRENT_VERSION=$(grep 'ENV PASS_CLI_VERSION=' bridge/Dockerfile | cut -d= -f2)
+          LATEST_VERSION=$(jq -r '.passCliVersions.version' <<<"$VERSIONS")
+          LATEST_HASH=$(jq -r '.passCliVersions.urls.linux.x86_64.hash' <<<"$VERSIONS")
+          CURRENT_VERSION=$(sed -n 's/^ENV PASS_CLI_VERSION=//p' bridge/Dockerfile | tr -d '[:space:]')
+
+          # Validate before using or printing anything from versions.json. Catches "null" when the JSON
+          # layout changes, and keeps untrusted text out of the shell, sed and workflow-command output.
+          if [[ ! "$LATEST_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::versions.json returned an unexpected version format"; exit 1
+          fi
+          if [[ ! "$LATEST_HASH" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::versions.json returned an unexpected sha256 format"; exit 1
+          fi
+          if [[ -z "$CURRENT_VERSION" ]]; then
+            echo "::error::ENV PASS_CLI_VERSION not found in bridge/Dockerfile"; exit 1
+          fi
 
           echo "Current: $CURRENT_VERSION"
           echo "Latest:  $LATEST_VERSION"
 
           NEWER=$(printf '%s\n' "$CURRENT_VERSION" "$LATEST_VERSION" | sort -V | tail -1)
-          if [ "$NEWER" = "$LATEST_VERSION" ] && [ "$CURRENT_VERSION" != "$LATEST_VERSION" ]; then
+          if [[ "$NEWER" == "$LATEST_VERSION" && "$CURRENT_VERSION" != "$LATEST_VERSION" ]]; then
             echo "Update available: $CURRENT_VERSION -> $LATEST_VERSION"
-            echo "updated=true" >> $GITHUB_OUTPUT
-            echo "latest_version=$LATEST_VERSION" >> $GITHUB_OUTPUT
-            echo "latest_hash=$LATEST_HASH" >> $GITHUB_OUTPUT
+            {
+              echo "updated=true"
+              echo "latest_version=$LATEST_VERSION"
+              echo "latest_hash=$LATEST_HASH"
+            } >> "$GITHUB_OUTPUT"
           else
             echo "Already up to date or ahead of stable (current=$CURRENT_VERSION, stable=$LATEST_VERSION)"
-            echo "updated=false" >> $GITHUB_OUTPUT
+            echo "updated=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Update Dockerfile
         if: steps.check.outputs.updated == 'true'
+        env:
+          VERSION: ${{ steps.check.outputs.latest_version }}
+          HASH: ${{ steps.check.outputs.latest_hash }}
         run: |
-          VERSION=${{ steps.check.outputs.latest_version }}
-          HASH=${{ steps.check.outputs.latest_hash }}
-          sed -i "s|ENV PASS_CLI_VERSION=.*|ENV PASS_CLI_VERSION=${VERSION}|" bridge/Dockerfile
-          sed -i "s|ENV PASS_CLI_HASH=.*|ENV PASS_CLI_HASH=${HASH}|" bridge/Dockerfile
+          set -euo pipefail
+          sed -i "s|^ENV PASS_CLI_VERSION=.*|ENV PASS_CLI_VERSION=${VERSION}|" bridge/Dockerfile
+          sed -i "s|^ENV PASS_CLI_HASH=.*|ENV PASS_CLI_HASH=${HASH}|" bridge/Dockerfile
+          grep -qx "ENV PASS_CLI_VERSION=${VERSION}" bridge/Dockerfile
+          grep -qx "ENV PASS_CLI_HASH=${HASH}" bridge/Dockerfile
 
       - name: Open PR
         if: steps.check.outputs.updated == 'true'
