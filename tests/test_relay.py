@@ -176,6 +176,33 @@ def test_reauth_failure_then_recovery(relay):
     assert relay.c.get("/ready").status_code == 200
 
 
+def test_regression_unpersisted_refresh_triggers_reauth(relay):
+    """2026-09-23..30 outage: pass-cli refreshed the token, failed to persist it ("background task failed"),
+    and every later call failed with "Error finding vault [..]: Error listing vaults". v2.0.0 read that as a
+    wrong vault (500) and never re-logged in. `info` keeps succeeding in this state, so it can't be the gate."""
+    relay.env.flag("stale")
+    r = relay.c.get(url("smtp-relay", "password"), headers=AUTH)
+    assert r.status_code == 200, r.text
+    assert r.json() == {"value": "login-password-VALUE"}
+    tail = [c["argv"][:2] for c in relay.env.calls()[3:]]
+    assert tail == [["item", "view"], ["logout", "--force"], ["login"], ["info"], ["item", "view"]]
+    assert relay.c.get("/ready").json() == {"ready": True}
+
+
+def test_regression_stale_session_with_failed_relogin_is_503(relay):
+    relay.env.flag("stale")
+    relay.env.flag("login_fail")
+    assert relay.c.get(url("smtp-relay", "password"), headers=AUTH).status_code == 503
+    assert relay.c.get("/ready").status_code == 503
+
+
+def test_non_definitive_error_retries_only_once(relay_factory, monkeypatch):
+    monkeypatch.setenv("MOCK_GARBAGE_TITLE", "smtp-relay")   # exit 0 but bad JSON -> no retry loop
+    r = relay_factory()
+    assert r.c.get(url("smtp-relay", "password"), headers=AUTH).status_code == 502
+    assert ["login"] not in [c["argv"] for c in r.env.calls()[3:]]
+
+
 def test_item_not_found_is_404_without_reauth(relay):
     r = relay.c.get(url("does-not-exist", "password"), headers=AUTH)
     assert r.status_code == 404
@@ -310,6 +337,29 @@ def _real_version():
 
 NEEDS_24 = pytest.mark.skipif((_real_version() or (0,)) < (2, 4, 0),
                               reason="pass-cli on PATH is < 2.4.0 (no session-dir permission check)")
+
+
+def test_access_log_drops_successful_probes_only(mock_env, tmp_path):
+    srv = Server("app", dict(os.environ), tmp_path / "access.log", log_level="info")
+    try:
+        assert srv.wait_ready(), srv.stop()
+        with httpx.Client(base_url=srv.url, timeout=30) as c:
+            for _ in range(5):
+                assert c.get("/health").status_code == 200
+                assert c.get("/ready").status_code == 200
+            assert c.get(url("smtp-relay", "password"), headers=AUTH).status_code == 200
+            assert c.get(url("smtp-relay", "password")).status_code in (401, 403)
+            mock_env.flag("stale")                     # broken session + failing re-login -> /ready 503
+            mock_env.flag("login_fail")
+            c.get(url("cloudflare-api", "token"), headers=AUTH)
+            assert c.get("/ready").status_code == 503
+    finally:
+        log = srv.stop()
+    access = [line for line in log.splitlines() if '" ' in line and " HTTP/1.1" in line]
+    assert not [line for line in access if '"GET /health ' in line], access
+    assert not [line for line in access if '"GET /ready HTTP/1.1" 200' in line], access
+    assert [line for line in access if '"GET /ready HTTP/1.1" 503' in line], access      # failures stay visible
+    assert len([line for line in access if "GET /secret/" in line]) == 3, access         # real traffic stays
 
 
 # ── 9. Real pass-cli 2.4.1 binary ────────────────────────────────────────────

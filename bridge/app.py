@@ -35,6 +35,26 @@ logging.basicConfig(
 log = logging.getLogger("proton-relay")
 
 
+class _ProbeAccessFilter(logging.Filter):
+    """Drop uvicorn access-log lines for successful /health and /ready probes (kubelet hits them every
+    10-30 s). Failed probes (e.g. /ready 503) and every other request are still logged."""
+
+    PATHS = frozenset({"/health", "/ready"})
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        # uvicorn logs: '%s - "%s %s HTTP/%s" %d' % (client, method, path, http_version, status)
+        args = record.args
+        if isinstance(args, tuple) and len(args) == 5:
+            path, status = args[2], args[4]
+            if path in self.PATHS and isinstance(status, int) and status < 400:
+                return False
+        return True
+
+
+# uvicorn configures its loggers before importing this module, so the filter survives startup.
+logging.getLogger("uvicorn.access").addFilter(_ProbeAccessFilter())
+
+
 # ── Config ────────────────────────────────────────────────────────────────────
 
 def _require(name: str) -> str:
@@ -109,7 +129,10 @@ _TRACING = re.compile(r"^\d{4}-\d{2}-\d{2}T\S+\s+(TRACE|DEBUG|INFO|WARN|ERROR)\s
 
 NO_SESSION = "requires an authenticated client"
 ITEM_MISSING = "No item found with title"
-VAULT_MISSING = "Error finding vault"
+# Only these two mean "your request is wrong". Anything else (notably pass-cli failing to persist a refreshed
+# session: "Error opening temp session file ... background task failed", wrapped in "Error finding vault [..]:
+# Error listing vaults") is treated as a broken session: re-authenticate and retry once.
+VAULT_MISSING = "Could not find vault"
 
 
 def condense(stderr: str) -> str:
@@ -185,12 +208,13 @@ def get_item(title: str) -> dict:
         if CACHE_TTL > 0 and (item := _cache_get(title)) is not None:
             return item  # filled while we waited for the lock
         rc, out, err = _view(title)
-        if rc != 0 and ITEM_MISSING not in err and VAULT_MISSING not in err and rc != 124:
-            if NO_SESSION in err or not session_valid():
-                log.warning("Session invalid — re-authenticating")
-                if not reauthenticate():
-                    raise HTTPException(503, "Failed to re-authenticate with Proton Pass")
-                rc, out, err = _view(title)
+        if rc not in (0, 124) and ITEM_MISSING not in err and VAULT_MISSING not in err:
+            # Don't gate this on `pass-cli info`: a session whose refresh was never persisted still passes
+            # `info` locally while every API call fails. One re-login is cheap; a stuck relay is not.
+            log.warning("pass-cli failed with a non-definitive error — re-authenticating and retrying once")
+            if not reauthenticate():
+                raise HTTPException(503, "Failed to re-authenticate with Proton Pass")
+            rc, out, err = _view(title)
         if rc != 0:
             if rc == 124:
                 raise HTTPException(504, "pass-cli timed out")

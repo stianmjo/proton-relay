@@ -13,6 +13,8 @@ Control files in $MOCK_DIR:
   session       exists => logged in
   expire_next   next `item view` expires the session first (then the flag is removed)
   login_fail    `login` fails
+  stale         session exists but its refresh was never persisted (pass-cli 2.3.x/2.4.x): every
+                `item view` fails with the real error chain while `info` still succeeds; `login` clears it
   calls.jsonl   one JSON line per invocation (argv + relevant env)
   overlaps      count of detected concurrent invocations
 """
@@ -92,6 +94,12 @@ def item_view(argv):
 
     if not logged_in():
         no_session()
+    if (M / "stale").exists():
+        sys.stderr.write(
+            "2026-09-30T00:49:35.696490Z ERROR pass-auth/src/store.rs:199: Error serializing auth: "
+            "Error saving session to storage\n\nCaused by:\n    0: Error opening temp session file\n"
+            "    1: background task failed\n")
+        fail(f"Error finding vault [{vault}]: Error listing vaults")
     if (M / "expire_next").exists():
         (M / "expire_next").unlink()
         (M / "session").unlink(missing_ok=True)
@@ -135,6 +143,7 @@ def main():
             if (M / "login_fail").exists():
                 fail("Error in personal access token login flow\n\nCaused by:\n    0: Error creating personal access token session")
             (M / "session").write_text("1")
+            (M / "stale").unlink(missing_ok=True)
             print("Logged in as noreply@nebulahvelvet.no")
         elif cmd == ["info"]:
             if not logged_in():
