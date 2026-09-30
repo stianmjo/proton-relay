@@ -141,7 +141,7 @@ Errors: `401` bad bearer · `403` item type not served · `404` item or field no
 
 **Filesystem.** The container runs as uid 1000 with a read-only root filesystem. `/session` and `/tmp` (both `emptyDir`) are the only writable paths; anything new that needs to write gets its own `emptyDir`.
 
-**Probes.** Liveness → `/health`, readiness → `/ready`.
+**Probes.** Liveness → `/health`, readiness → `/ready`. Successful probe requests are left out of the access log; a failing probe (e.g. `/ready` 503) and every `/secret` and `/fields` request are still logged.
 
 **Throughput.** pass-cli calls run one at a time: concurrent processes on one session race Proton's rotating refresh token and sign each other out. Each uncached lookup lists and decrypts the whole vault, so keep the vault small and the cache on.
 

@@ -102,12 +102,12 @@ def free_port() -> int:
 class Server:
     """A real uvicorn process — for concurrency and startup-failure tests."""
 
-    def __init__(self, module, env, log_path):
+    def __init__(self, module, env, log_path, log_level="warning"):
         self.port = free_port()
         self.log_path = log_path
         self.log = open(log_path, "w")
         self.proc = subprocess.Popen(
-            [sys.executable, "-m", "uvicorn", f"{module}:app", "--port", str(self.port), "--log-level", "warning"],
+            [sys.executable, "-m", "uvicorn", f"{module}:app", "--port", str(self.port), "--log-level", log_level],
             cwd=ROOT, env=env, stdout=self.log, stderr=subprocess.STDOUT,
         )
         self.url = f"http://127.0.0.1:{self.port}"
