@@ -12,7 +12,7 @@ ExternalSecret → ESO → proton-relay → pass-cli → Proton Pass API → Kub
 
 - Proton Pass **paid plan** (the CLI requires it)
 - External Secrets Operator running in-cluster
-- pass-cli 2.4.x in the image (tested with 2.4.1)
+- pass-cli 2.5.x in the image (tested with 2.5.1)
 
 ## Setup
 
@@ -80,6 +80,12 @@ A commented version with every field type is in `deploy/externalsecret.yaml.exam
 
 Keep item titles free of `/` and spaces — the title is a URL path segment.
 
+### Folders
+
+Items can live at the vault root or in any folder (for example one folder per namespace). The reference stays `<ItemTitle>/<field>` — the folder is **not** part of the key, and the relay finds the item wherever it sits in the vault.
+
+Because the folder isn't part of the lookup, **item titles must be unique across the whole vault**. If two items share a title, pass-cli returns whichever it finds first, so prefix titles instead (`authentik-postgres`, `media-postgres`).
+
 ### Item types
 
 | Type | Served | Fields |
@@ -143,7 +149,7 @@ Errors: `401` bad bearer · `403` item type not served · `404` item or field no
 
 **Probes.** Liveness → `/health`, readiness → `/ready`. Successful probe requests are left out of the access log; a failing probe (e.g. `/ready` 503) and every `/secret` and `/fields` request are still logged.
 
-**Throughput.** pass-cli calls run one at a time: concurrent processes on one session race Proton's rotating refresh token and sign each other out. Each uncached lookup lists and decrypts the whole vault, so keep the vault small and the cache on.
+**Throughput.** pass-cli calls run one at a time: concurrent processes on one session race Proton's rotating refresh token and sign each other out. Each uncached lookup lists and decrypts the vault's items until it finds the title, so keep the vault small and the cache on.
 
 ## PAT rotation
 
@@ -186,6 +192,6 @@ pip install -r requirements-dev.txt
 pytest tests -q
 ```
 
-The suite runs against a mock pass-cli and needs no PAT or network. Fixtures were generated from pass-cli 2.4.1's own data models, and lookups are checked against pass-cli's own resolver. Real-binary tests run when `pass-cli` is on `PATH` (or `PASS_CLI_REAL_BIN` is set), each in a throwaway session directory, so your personal session is never touched.
+The suite runs against a mock pass-cli and needs no PAT or network. Fixtures were generated from pass-cli 2.4.1's own data models (the item JSON is unchanged in 2.5.1), and lookups are checked against pass-cli's own resolver. Real-binary tests run when `pass-cli` is on `PATH` (or `PASS_CLI_REAL_BIN` is set), each in a throwaway session directory, so your personal session is never touched.
 
 CI (`.github/workflows/tests.yaml`) runs the same suite on every pull request and before each release build, with the pass-cli version pinned in `bridge/Dockerfile`. Pull requests opened by the update workflow need **Approve workflows to run** once.
