@@ -1,0 +1,28 @@
+{
+  "item": {
+    "id": "item_13",
+    "share_id": "share_homelab",
+    "vault_id": "vault_homelab",
+    "content": {
+      "title": "twin",
+      "note": "",
+      "item_uuid": "uuid-item_13",
+      "content": {
+        "Login": {
+          "email": "",
+          "username": "user-item_13",
+          "password": "twin-a-PASSWORD",
+          "urls": [],
+          "totp_uri": "",
+          "passkeys": []
+        }
+      },
+      "extra_fields": []
+    },
+    "state": "Active",
+    "flags": [],
+    "create_time": "2026-09-21T14:13:20",
+    "modify_time": "2026-09-21T14:13:20"
+  },
+  "attachments": []
+}

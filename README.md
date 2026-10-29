@@ -1,57 +1,57 @@
 # proton-relay
 
-*A proton relay transfers energy between systems — this one transfers secrets between Proton Pass and Kubernetes.*
-
-Bridges [External Secrets Operator](https://external-secrets.io) to [Proton Pass](https://proton.me/pass) vaults, using the Proton Pass CLI and a scoped Personal Access Token.
+Serves secrets from a Proton Pass vault to [External Secrets Operator](https://external-secrets.io) (ESO), using the Proton Pass CLI and a read-only Personal Access Token (PAT).
 
 ```
-ExternalSecret → ESO → proton-relay → pass-cli → Proton Pass API → Kubernetes Secret
+ExternalSecret -> ESO -> proton-relay -> pass-cli -> Proton Pass -> Kubernetes Secret
 ```
 
 ## Requirements
 
-- Proton Pass **paid plan** (the CLI requires it)
-- External Secrets Operator running in-cluster
-- pass-cli 2.5.x in the image (tested with 2.5.1)
+- Proton Pass paid plan (the CLI requires it)
+- External Secrets Operator in the cluster
+- pass-cli 2.5.x (pinned in `bridge/Dockerfile`)
 
-## Setup
+## Deploy
 
-**1. Vault** — create a vault in Proton Pass (e.g. `Kubernetes`); its name becomes `PROTON_PASS_VAULT`.
+**1. Vault.** Create a vault in Proton Pass, for example `Kubernetes`.
 
-**2. PAT** — on your local machine:
+**2. PAT.** On your own machine:
 
 ```sh
-pass-cli pat create --name "my-cluster-eso" --expiration 1y   # token is shown once — save it
+pass-cli pat create --name "my-cluster-eso" --expiration 1y     # shown once, save it
 pass-cli pat access grant --pat-name "my-cluster-eso" --vault-name "Kubernetes" --role viewer
 ```
 
-**3. Secret** (applied manually — never committed):
+**3. Secret.** Apply by hand, never commit it:
 
 ```sh
-read -rsp 'PAT: ' PAT; echo            # keeps the token out of shell history
+read -rsp 'PAT: ' PAT; echo
 kubectl create secret generic proton-relay -n external-secrets \
   --from-literal=PROTON_PASS_PERSONAL_ACCESS_TOKEN="$PAT" \
   --from-literal=BRIDGE_TOKEN="$(openssl rand -hex 32)"
 unset PAT
-
 kubectl label secret proton-relay -n external-secrets external-secrets.io/type=webhook
 ```
 
-`deploy/secret.yaml.example` shows the expected shape. It is deliberately not a `.yaml` file, so `kubectl apply -f deploy/` can never overwrite the real Secret with placeholders.
-
-**4. Deploy:**
+**4. Relay and store.** Set your vault name in `deploy/deployment.yaml` (`PROTON_PASS_VAULT`), then:
 
 ```sh
 kubectl apply -f deploy/deployment.yaml
 kubectl apply -f deploy/eso-secretstore.yaml
-
-kubectl logs -n external-secrets deploy/proton-relay
-# Authentication succeeded → === proton-relay ready ===
+kubectl logs -n external-secrets deploy/proton-relay     # expect: proton-relay ready | vault=...
 ```
 
-## Adding secrets
+## Using secrets
 
-Create items in the vault and use **hidden fields** for secret values. Reference them by `<ItemTitle>/<field>`:
+Reference a field as `<folder path>/<item title>/<field>`, or by item ID as `id:<ItemID>/<field>`.
+
+| Key | Item |
+|---|---|
+| `postgres/password` | `postgres` at the vault root |
+| `my-app/postgres/password` | `postgres` in folder `my-app` |
+| `my-app/db/postgres/password` | `postgres` in folder `my-app/db` |
+| `id:<ItemID>/password` | the item with that ID, in any folder |
 
 ```yaml
 apiVersion: external-secrets.io/v1
@@ -66,123 +66,125 @@ spec:
     name: proton-relay
   target:
     name: postgres
-    creationPolicy: Owner
   data:
-    - secretKey: username
-      remoteRef:
-        key: "postgres/username"
     - secretKey: password
       remoteRef:
-        key: "postgres/password"
+        key: "my-app/postgres/password"
 ```
 
-A commented version with every field type is in `deploy/externalsecret.yaml.example`.
+More examples: `deploy/externalsecret.yaml.example`.
 
-Keep item titles free of `/` and spaces — the title is a URL path segment.
+**Rules**
 
-### Folders
+- Folder names and titles are exact and case-sensitive. Field names are case-insensitive.
+- A key without a folder only matches items at the vault root.
+- Keep folder names, titles and fields free of `/` and spaces. A root title can't start with `id:`.
+- Trashed items are ignored.
+- Two items with the same title in the same folder, or two sibling folders with the same name, return `409` with the matching IDs. Rename one or use `id:`.
 
-Items can live at the vault root or in any folder (for example one folder per namespace). The reference stays `<ItemTitle>/<field>` — the folder is **not** part of the key, and the relay finds the item wherever it sits in the vault.
-
-Because the folder isn't part of the lookup, **item titles must be unique across the whole vault**. If two items share a title, pass-cli returns whichever it finds first, so prefix titles instead (`authentik-postgres`, `media-postgres`).
-
-### Item types
+**Item types**
 
 | Type | Served | Fields |
 |---|---|---|
-| Login | yes | `username` `password` `email` `urls` (comma-joined) `url` (first URL) `totp` / `totp_uri` |
-| Custom | yes | `<Section>.<field>` for every section field |
-| Note | yes | — |
+| Login | yes | `username` `password` `email` `urls` `url` (first URL) `totp` `totp_uri` |
+| Custom | yes | `<Section>.<field>`, or `<field>` if unique |
+| Note | yes | none extra |
 | SSH key | opt-in (`ALLOWED_ITEM_TYPES`) | `private_key` `public_key` + section fields |
-| Credit card, Wifi, Identity | **no** — `403` | — |
+| Credit card, Wifi, Identity | no (`403`) | |
 
-Every served item also has `title`, `note`, and any custom field you added to it by name.
+Every served item also has `title`, `note` and its custom fields. Empty built-in fields return `404`. TOTP fields return the `otpauth://` URI.
 
-### Lookup rules
-
-Field lookup mirrors pass-cli's own resolver, so references behave the same as `pass://` references:
-
-- Names are **case-insensitive**.
-- Search order: `title`, `note`, the item's custom fields, then the type's fields. First match wins — a custom field named `password` shadows a Login's password.
-- An exact match is tried first; otherwise the part after the last `.` is matched. `token` finds `API.token`; use `Zone.token` to pick a specific section.
-- Empty built-in fields don't exist (`404`); an empty custom field returns `""`.
-- TOTP fields return the `otpauth://` URI, not a code. Timestamp fields return Unix seconds.
-
-Discover an item's exact field names:
+**Find an item's ID and field names**
 
 ```sh
 curl -s -H "Authorization: Bearer <BRIDGE_TOKEN>" \
-  http://proton-relay.external-secrets.svc:80/fields/<ItemTitle>
+  http://proton-relay.external-secrets.svc/fields/my-app/postgres
+# {"item": "my-app/postgres", "id": "...", "type": "Login", "fields": ["title", "username", "password"]}
 ```
 
 ## API
 
-| Endpoint | Auth | Response |
+| Endpoint | Auth | Returns |
 |---|---|---|
-| `GET /health` | — | `200` always (liveness) |
-| `GET /ready` | — | `200` while authenticated to Proton, `503` otherwise (readiness) |
-| `GET /secret/{item}/{field}` | bearer | `{"value": "..."}` |
-| `GET /fields/{item}` | bearer | `{"item": "...", "type": "...", "fields": [...]}` |
+| `GET /health` | none | `200` (liveness) |
+| `GET /ready` | none | `200` after the first login (readiness) |
+| `GET /secret/<key>/<field>` | bearer | `{"value": "..."}` |
+| `GET /fields/<key>` | bearer | `{"item", "id", "type", "fields"}` |
 
-Errors: `401` bad bearer · `403` item type not served · `404` item or field not found · `500` configured vault not found · `502` pass-cli error · `503` re-authentication failed or relay busy · `504` pass-cli timed out.
+| Code | Meaning |
+|---|---|
+| `400` | malformed key |
+| `401` | wrong bearer token |
+| `403` | item type not served |
+| `404` | folder, item or field not found |
+| `409` | ambiguous key |
+| `500` | vault not found |
+| `502` | pass-cli error |
+| `503` | re-login failed, backing off, or relay busy |
+| `504` | pass-cli timed out |
 
-## Environment variables
+## Configuration
 
 | Variable | Default | Description |
 |---|---|---|
-| `PROTON_PASS_PERSONAL_ACCESS_TOKEN` | *required* | PAT from `pass-cli pat create` |
-| `PROTON_PASS_VAULT` | *required* | Vault name the PAT can read |
-| `BRIDGE_TOKEN` | *required* | Shared secret between ESO and the bridge |
-| `ALLOWED_ITEM_TYPES` | `Login,Note,Custom` | Add `SshKey` to serve SSH keys. Other types are refused at startup |
-| `CACHE_TTL_SECONDS` | `60` | Per-item cache; `0` disables |
-| `PASS_CLI_TIMEOUT_SECONDS` | `60` | Max runtime of one pass-cli call |
-| `LOCK_WAIT_SECONDS` | `90` | Max queue wait before `503` |
-| `PROTON_PASS_SESSION_DIR` | `~/.local/share/proton-pass-cli` | pass-cli session location |
-| `PROTON_PASS_AGENT_REASON` | per-request | Audit reason for agent tokens; ignored by regular PATs |
-| `LOG_LEVEL` | `INFO` | |
+| `PROTON_PASS_PERSONAL_ACCESS_TOKEN` | required | PAT with viewer access to the vault |
+| `PROTON_PASS_VAULT` | required | Vault name |
+| `BRIDGE_TOKEN` | required | Bearer token shared with ESO |
+| `ALLOWED_ITEM_TYPES` | `Login,Note,Custom` | Add `SshKey` to serve SSH keys |
+| `CACHE_TTL_SECONDS` | `60` | Per-item cache, `0` disables |
+| `PASS_CLI_TIMEOUT_SECONDS` | `60` | Max time for one pass-cli call |
+| `LOCK_WAIT_SECONDS` | `90` | Max queue time before `503` |
+| `LOGIN_BACKOFF_SECONDS` | `300` | Wait after a failed re-login before trying again |
+| `PROTON_PASS_SESSION_DIR` | `~/.local/share/proton-pass-cli` | pass-cli session directory |
+| `LOG_LEVEL` | `INFO` | `DEBUG` shows pass-cli error details |
 
 ## Operations
 
-**Session directory.** The session is disposable — the relay logs out and back in on every start. `deploy/deployment.yaml` mounts an `emptyDir` at `/session` and points `PROTON_PASS_SESSION_DIR` at it. pass-cli 2.4+ refuses a symlinked session directory or one readable by group/others. The relay tightens permissions at startup and fails fast on symlinks, so never mount the session directory from a Secret or ConfigMap.
+**Sessions.** Proton sessions expire every few hours. The relay logs in again and retries the request once, so ESO never notices. If the login fails, requests get `503` and the relay waits `LOGIN_BACKOFF_SECONDS` before the next login, to stay under Proton's login rate limit.
 
-**Filesystem.** The container runs as uid 1000 with a read-only root filesystem. `/session` and `/tmp` (both `emptyDir`) are the only writable paths; anything new that needs to write gets its own `emptyDir`.
+**Readiness.** The pod is ready after its first login and stays ready. A pod that turned unready would be removed from the Service, and no request could reach it to trigger the login that fixes it.
 
-**Probes.** Liveness → `/health`, readiness → `/ready`. Successful probe requests are left out of the access log; a failing probe (e.g. `/ready` 503) and every `/secret` and `/fields` request are still logged.
+**Logs.** One line per event. A healthy relay logs only `Served ...` and `Re-authenticated (...)`.
 
-**Throughput.** pass-cli calls run one at a time: concurrent processes on one session race Proton's rotating refresh token and sign each other out. Each uncached lookup lists and decrypts the vault's items until it finds the title, so keep the vault small and the cache on.
+| Level | Meaning |
+|---|---|
+| `INFO` | normal operation |
+| `WARNING` | a request was refused, fix the ExternalSecret or the vault |
+| `ERROR` | the relay can't reach Proton Pass |
+
+**Session directory.** Mount an `emptyDir` at `/session` (see `deploy/deployment.yaml`). pass-cli refuses symlinks and group/other permissions; the relay fixes permissions at startup. Never mount it from a Secret or ConfigMap.
+
+**Throughput.** pass-cli calls run one at a time, since parallel calls on one session sign each other out. Keep the cache on.
+
+## Security
+
+- The PAT is read-only and scoped to one vault
+- Credit card, Wifi and Identity items are refused before their contents are read
+- Requested titles and folder names never reach the pass-cli command line
+- Every request needs the bearer token (constant-time compare)
+- Secret values are never logged
+- Responses send `Cache-Control: no-store`; OpenAPI docs are off
+- The pod runs as non-root with a read-only root filesystem, no capabilities and no service-account token
 
 ## PAT rotation
 
-PATs expire — set a reminder ~2 weeks before. Grants are preserved across renewal.
+PATs expire. Renew about two weeks before:
 
 ```sh
-pass-cli pat renew --pat-name "my-cluster-eso" --expiration 1y   # prints the new token
-
+pass-cli pat renew --pat-name "my-cluster-eso" --expiration 1y
 read -rsp 'New PAT: ' PAT; echo
 kubectl patch secret proton-relay -n external-secrets --type=json \
   -p="[{\"op\":\"replace\",\"path\":\"/data/PROTON_PASS_PERSONAL_ACCESS_TOKEN\",\"value\":\"$(printf %s "$PAT" | base64 -w0)\"}]"
 unset PAT
-
 kubectl rollout restart deploy/proton-relay -n external-secrets
 ```
 
-## Security
-
-- PAT is scoped to one vault with `viewer` (read-only) role — no other vaults reachable
-- Credit card, Wifi and Identity items are never served, cached or logged
-- Every request requires a valid `BRIDGE_TOKEN` bearer header (constant-time comparison)
-- Secret values are never logged — only item titles and field names
-- Responses carry `Cache-Control: no-store`; OpenAPI docs are disabled
-- Values are held in memory for at most `CACHE_TTL_SECONDS`
-- pass-cli uses filesystem key storage inside the container; Proton's E2E encryption is unaffected
-- Pod runs as non-root (uid 1000) with a read-only root filesystem, all capabilities dropped, no privilege escalation, `RuntimeDefault` seccomp, and no service-account token
-
 ## Updating pass-cli
 
-1. The scheduled `pass-cli-update` workflow opens a PR bumping `PASS_CLI_VERSION` and `PASS_CLI_HASH` in `bridge/Dockerfile`.
-2. Click **Approve workflows to run** on the PR — the suite runs against the new binary.
-3. Review the pass-cli changelog for breaking changes, then merge.
-4. Tag and publish a release — patch bump for a pass-cli-only update, minor/major if relay behaviour changes. The release runs the tests again, then builds and pushes the image.
+1. The weekly `pass-cli-update` workflow opens a PR with the new version and hash.
+2. Click **Approve workflows to run** so the tests run against the new binary.
+3. Check the pass-cli changelog, then merge.
+4. Publish a release (patch for a pass-cli-only update). The release runs the tests, then builds and pushes the image.
 
 ## Development
 
@@ -192,6 +194,4 @@ pip install -r requirements-dev.txt
 pytest tests -q
 ```
 
-The suite runs against a mock pass-cli and needs no PAT or network. Fixtures were generated from pass-cli 2.4.1's own data models (the item JSON is unchanged in 2.5.1), and lookups are checked against pass-cli's own resolver. Real-binary tests run when `pass-cli` is on `PATH` (or `PASS_CLI_REAL_BIN` is set), each in a throwaway session directory, so your personal session is never touched.
-
-CI (`.github/workflows/tests.yaml`) runs the same suite on every pull request and before each release build, with the pass-cli version pinned in `bridge/Dockerfile`. Pull requests opened by the update workflow need **Approve workflows to run** once.
+The tests use a mock pass-cli with fixtures in `tests/fixtures/`, so they need no PAT or network. Tests against the real binary run when `pass-cli` 2.5+ is on `PATH` or `PASS_CLI_REAL_BIN` is set. CI runs the suite on every pull request and before every release.

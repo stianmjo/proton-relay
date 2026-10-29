@@ -1,14 +1,19 @@
 """
-proton-relay — serves Proton Pass fields to in-cluster consumers over HTTP.
+proton-relay — serves Proton Pass fields to in-cluster consumers (External Secrets Operator) over HTTP.
 
-Targets pass-cli 2.4.x. Relevant upstream behaviour (verified against pass-cli source):
-  * 2.4.0 refuses a session dir that is a symlink, and a `.session` dir with any
-    group/other permission bits (fsGroup on a PVC does exactly that).
-  * Proton refresh tokens rotate: concurrent pass-cli processes sharing one session
-    can invalidate each other. All pass-cli calls are therefore serialized.
-  * Field lookup mirrors pass-cli's own Item::get_field() (pass-domain/src/models/item/field.rs):
-    case-insensitive, item-level custom fields first, Custom-item sections as
-    "Section.field" with an unqualified fallback.
+Key format (everything after /secret/ or /fields/):
+    <folder>/.../<ItemTitle>/<field>    the item at exactly that folder path (no folder = vault root)
+    id:<ItemID>/<field>                 the item with that Proton ID, wherever it is in the vault
+Folder names and titles match exactly. Field names are case-insensitive. Trashed items are ignored.
+If two items (or two sibling folders) share a name, the key is ambiguous: 409, never a guess.
+
+Targets pass-cli 2.5.x. Upstream behaviour relied on (verified against pass-cli source):
+  * `item list --output json` prints metadata only (id, title, folder_id, item_type, state), never secrets.
+  * `folder list --output json` prints [{id, parent_folder_id, content: {name}}].
+  * 2.4.0+ refuses a session dir that is a symlink or has group/other permission bits.
+  * Proton refresh tokens rotate: concurrent pass-cli processes on one session sign each other out,
+    so all pass-cli calls are serialized.
+  * Field lookup mirrors pass-cli's own Item::get_field() (pass/src/domain/models/item/field.rs).
 """
 
 import hmac
@@ -22,10 +27,15 @@ import sys
 import threading
 import time
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Response, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+# INFO: normal operation (served, re-authenticated). WARNING: a request we refused (404/409/403).
+# ERROR: needs attention (login failing, pass-cli failing after re-login). pass-cli error chains: DEBUG.
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO").upper(),
@@ -36,8 +46,7 @@ log = logging.getLogger("proton-relay")
 
 
 class _ProbeAccessFilter(logging.Filter):
-    """Drop uvicorn access-log lines for successful /health and /ready probes (kubelet hits them every
-    10-30 s). Failed probes (e.g. /ready 503) and every other request are still logged."""
+    """Drop uvicorn access-log lines for successful /health and /ready probes; failed probes still log."""
 
     PATHS = frozenset({"/health", "/ready"})
 
@@ -70,8 +79,8 @@ _require("PROTON_PASS_PERSONAL_ACCESS_TOKEN")
 VAULT = _require("PROTON_PASS_VAULT")
 BRIDGE_TOKEN = _require("BRIDGE_TOKEN").encode()
 
-# Item types this relay knows how to resolve. CreditCard, Wifi and Identity are
-# deliberately unsupported: their data has no business in a Kubernetes Secret.
+# Item types this relay can serve. CreditCard, Wifi and Identity are deliberately unsupported:
+# their data has no business in a Kubernetes Secret.
 SUPPORTED_TYPES = {"Login", "Note", "Custom", "SshKey"}
 ALLOWED_TYPES = {t.strip() for t in os.environ.get("ALLOWED_ITEM_TYPES", "Login,Note,Custom").split(",") if t.strip()}
 if not ALLOWED_TYPES <= SUPPORTED_TYPES:
@@ -79,18 +88,23 @@ if not ALLOWED_TYPES <= SUPPORTED_TYPES:
               sorted(ALLOWED_TYPES - SUPPORTED_TYPES), sorted(SUPPORTED_TYPES))
     sys.exit(1)
 
-CACHE_TTL = float(os.environ.get("CACHE_TTL_SECONDS", "60"))          # 0 disables
-CLI_TIMEOUT = float(os.environ.get("PASS_CLI_TIMEOUT_SECONDS", "60"))
+# `item list` reports types in snake_case; the relay (and ALLOWED_ITEM_TYPES) uses pass-cli's JSON names.
+LIST_TYPES = {"login": "Login", "note": "Note", "custom": "Custom", "ssh_key": "SshKey", "alias": "Alias",
+              "credit_card": "CreditCard", "identity": "Identity", "wifi": "Wifi"}
+
+CACHE_TTL = float(os.environ.get("CACHE_TTL_SECONDS", "60"))           # 0 disables
+CLI_TIMEOUT = float(os.environ.get("PASS_CLI_TIMEOUT_SECONDS", "60"))  # per pass-cli call
 LOCK_WAIT = float(os.environ.get("LOCK_WAIT_SECONDS", "90"))
-MAX_REASON = 300  # pass/src/monitor.rs MAX_REASON_LENGTH
+# After a failed re-login, wait this long before trying again: repeated logins trip Proton's
+# per-account rate limit (API code 2028), which pass-cli reports only as free text.
+LOGIN_BACKOFF = float(os.environ.get("LOGIN_BACKOFF_SECONDS", "300"))
+MAX_REASON = 300  # pass-cli monitor.rs MAX_REASON_LENGTH
 
 # Filesystem key storage — keyring/env providers mismatch in containers. Do not change.
 os.environ["PROTON_PASS_KEY_PROVIDER"] = "fs"
 
-log.info("Starting proton-relay | vault=%s | types=%s | cache_ttl=%ss", VAULT, sorted(ALLOWED_TYPES), CACHE_TTL)
 
-
-# ── Session directory (pass-cli 2.4.x hardening) ─────────────────────────────
+# ── Session directory (pass-cli 2.4+ hardening) ──────────────────────────────
 
 def session_base_dir() -> Path:
     """Same resolution as pass-cli utils.rs get_base_dir() on Linux."""
@@ -119,20 +133,28 @@ def prepare_session_dir() -> None:
         os.chmod(sess, mode & ~0o077)
 
 
-# ── pass-cli invocation ──────────────────────────────────────────────────────
-
-_cli_lock = threading.Lock()   # one pass-cli process at a time: shared session, rotating refresh token
-_state = {"ready": False}
+# ── pass-cli ──────────────────────────────────────────────────────────────────
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 _TRACING = re.compile(r"^\d{4}-\d{2}-\d{2}T\S+\s+(TRACE|DEBUG|INFO|WARN|ERROR)\s")
 
 NO_SESSION = "requires an authenticated client"
-ITEM_MISSING = "No item found with title"
-# Only these two mean "your request is wrong". Anything else (notably pass-cli failing to persist a refreshed
-# session: "Error opening temp session file ... background task failed", wrapped in "Error finding vault [..]:
-# Error listing vaults") is treated as a broken session: re-authenticate and retry once.
+# The only pass-cli failure that means "your config is wrong". Anything else (expired session, a refresh
+# pass-cli failed to persist: "Error finding vault [..]: Error listing vaults") is a broken session.
 VAULT_MISSING = "Could not find vault"
+
+
+class CliError(Exception):
+    """A pass-cli call failed. `detail` is condensed stderr (pass-cli never prints secret values there)."""
+
+    def __init__(self, detail: str, timed_out: bool = False):
+        super().__init__(detail)
+        self.detail, self.timed_out = detail, timed_out
+
+    @property
+    def short(self) -> str:
+        """Last link of the error chain, e.g. 'non-existent session'."""
+        return re.sub(r"^(\d+: |Error: )", "", self.detail.rsplit(" | ", 1)[-1])
 
 
 def condense(stderr: str) -> str:
@@ -147,97 +169,185 @@ def condense(stderr: str) -> str:
     return " | ".join(out)[:600]
 
 
-def pass_cli(args: list[str], reason: str | None = None) -> tuple[int, str, str]:
+def pass_cli(args: list[str], reason: str | None = None) -> str:
+    """Run pass-cli and return stdout. Raises CliError on failure or timeout."""
     env = dict(os.environ, RUST_BACKTRACE="0")
-    # Required for agent tokens, ignored for regular PATs (agent_monitor.rs). An operator-set value wins.
+    # Required for agent tokens, ignored for regular PATs. An operator-set value wins.
     if reason and "PROTON_PASS_AGENT_REASON" not in os.environ:
         env["PROTON_PASS_AGENT_REASON"] = reason[:MAX_REASON]
+    cmd = " ".join(a for a in args[:2] if not a.startswith("-"))
     try:
         r = subprocess.run(["pass-cli", *args], capture_output=True, text=True, env=env, timeout=CLI_TIMEOUT)
     except subprocess.TimeoutExpired:
-        log.error("pass-cli %s timed out after %ss", args[0], CLI_TIMEOUT)
-        return 124, "", "timeout"
-    err = condense(r.stderr)
+        raise CliError(f"pass-cli {cmd} timed out after {CLI_TIMEOUT:g}s", timed_out=True)
     if r.returncode != 0:
-        log.warning("pass-cli %s failed (exit %d): %s", args[0], r.returncode, err)
-    return r.returncode, r.stdout, err
+        err = condense(r.stderr)
+        log.debug("pass-cli %s failed (exit %d): %s", cmd, r.returncode, err)
+        raise CliError(err)
+    return r.stdout
 
 
-def session_valid() -> bool:
-    return pass_cli(["info"])[0] == 0
+def pass_cli_json(args: list[str], reason: str):
+    try:
+        return json.loads(pass_cli([*args, f"--vault-name={VAULT}", "--output=json"], reason))
+    except ValueError:
+        raise HTTPException(502, "Unparseable pass-cli output")
 
 
-def reauthenticate() -> bool:
-    """Caller must hold _cli_lock."""
-    log.info("Authenticating with PAT…")
-    pass_cli(["logout", "--force"])
-    ok = pass_cli(["login"])[0] == 0 and session_valid()
-    _state["ready"] = ok
-    log.info("Authentication %s", "succeeded" if ok else "FAILED")
-    return ok
+# ── Session ───────────────────────────────────────────────────────────────────
+
+_cli_lock = threading.Lock()   # one pass-cli process at a time (shared session, rotating refresh token)
+_state = {"login_after": 0.0}  # monotonic time before which no new login is attempted
 
 
-# ── Item fetch with cache ─────────────────────────────────────────────────────
+def login() -> str | None:
+    """Log in fresh with the PAT. Caller holds _cli_lock. Returns None on success, else why it failed."""
+    wait = _state["login_after"] - time.monotonic()
+    if wait > 0:
+        return f"previous login failed, next attempt in {wait:.0f}s"
+    try:
+        pass_cli(["logout", "--force"])
+    except CliError:
+        pass  # nothing to log out of
+    try:
+        pass_cli(["login"])
+        pass_cli(["info"])
+    except CliError as e:
+        _state["login_after"] = time.monotonic() + LOGIN_BACKOFF
+        return e.detail
+    _state["login_after"] = 0.0
+    return None
 
-_cache: dict[str, tuple[float, dict]] = {}
+
+# ── Keys ──────────────────────────────────────────────────────────────────────
+
+KEY_HELP = "key must be <folder>/.../<item>/<field> or id:<ItemID>/<field>"
+
+
+@dataclass(frozen=True)
+class Ref:
+    """Which item a key points at: a folder path + title, or a Proton item ID."""
+    folders: tuple[str, ...] = ()
+    title: str = ""
+    item_id: str = ""
+
+    def __str__(self) -> str:
+        return f"id:{self.item_id}" if self.item_id else "/".join((*self.folders, self.title))
+
+
+def parse_key(key: str, with_field: bool) -> tuple[Ref, str | None]:
+    parts = key.split("/")
+    field = parts.pop() if with_field and len(parts) > 1 else None
+    if "" in parts or (with_field and not field):
+        raise HTTPException(400, KEY_HELP)
+    if parts[0].startswith("id:"):
+        if len(parts) > 1 or parts[0] == "id:":
+            raise HTTPException(400, KEY_HELP)
+        return Ref(item_id=parts[0][3:]), field
+    return Ref(folders=tuple(parts[:-1]), title=parts[-1]), field
+
+
+# ── Item lookup ───────────────────────────────────────────────────────────────
+
+def find_folder(path: tuple[str, ...], reason: str) -> str:
+    """Folder ID for a folder path, walked from the vault root."""
+    folders = pass_cli_json(["folder", "list"], reason)
+    parent = None
+    for depth, name in enumerate(path, 1):
+        here = [f for f in folders if f["content"]["name"] == name and f.get("parent_folder_id") == parent]
+        where = "/".join(path[:depth])
+        if not here:
+            raise HTTPException(404, f"Folder not found: {where}")
+        if len(here) > 1:
+            raise HTTPException(409, f"Ambiguous folder: {len(here)} folders at {where}")
+        parent = here[0]["id"]
+    return parent
+
+
+def fetch_item(ref: Ref) -> dict:
+    """Resolve ref to exactly one active item via metadata, then read that one item by ID."""
+    try:
+        return _fetch_item(ref)
+    except (KeyError, TypeError, AttributeError):   # pass-cli JSON not shaped as expected
+        raise HTTPException(502, "Unexpected pass-cli output")
+
+
+def _fetch_item(ref: Ref) -> dict:
+    reason = f"proton-relay: read '{ref}' for Kubernetes secret sync"
+    items = pass_cli_json(["item", "list", "--filter-state=active"], reason)["items"]
+    if ref.item_id:
+        matches = [i for i in items if i["id"] == ref.item_id]
+    else:
+        folder_id = find_folder(ref.folders, reason) if ref.folders else None
+        matches = [i for i in items if i["title"] == ref.title and i.get("folder_id") == folder_id]
+
+    if not matches:
+        raise HTTPException(404, f"Item not found: {ref}")
+    if len(matches) > 1:
+        ids = ", ".join(f"id:{i['id']}" for i in matches)
+        raise HTTPException(409, f"Ambiguous: {len(matches)} items match {ref}; use one of {ids}")
+    kind = LIST_TYPES.get(matches[0]["item_type"], matches[0]["item_type"])
+    if kind not in ALLOWED_TYPES:   # refused before its content is ever read
+        raise HTTPException(403, f"Item type {kind} is not served by this relay")
+
+    item = pass_cli_json(["item", "view", f"--item-id={matches[0]['id']}"], reason)["item"]
+    if not isinstance(item, dict):
+        raise TypeError("item is not an object")
+    return item
+
+
+def http_error(e: CliError) -> HTTPException:
+    if e.timed_out:
+        return HTTPException(504, "pass-cli timed out")
+    if VAULT_MISSING in e.detail:
+        log.error("Vault %r not found — check PROTON_PASS_VAULT", VAULT)
+        return HTTPException(500, "Configured vault not found")
+    return HTTPException(502, "pass-cli error")
+
+
+_cache: dict[Ref, tuple[float, dict]] = {}
 _cache_lock = threading.Lock()
 
 
-def _cache_get(title: str) -> dict | None:
+def _cache_get(ref: Ref) -> dict | None:
     with _cache_lock:
-        hit = _cache.get(title)
+        hit = _cache.get(ref)
         if hit and hit[0] > time.monotonic():
             return hit[1]
-        _cache.pop(title, None)
+        _cache.pop(ref, None)
         return None
 
 
-def _view(title: str) -> tuple[int, str, str]:
-    return pass_cli(
-        ["item", "view", f"--vault-name={VAULT}", f"--item-title={title}", "--output", "json"],
-        reason=f"proton-relay: read item '{title}' for Kubernetes secret sync",
-    )
-
-
-def get_item(title: str) -> dict:
-    if CACHE_TTL > 0 and (item := _cache_get(title)) is not None:
+def get_item(ref: Ref) -> dict:
+    """Cached fetch_item. A failing session gets one fresh login and one retry."""
+    if CACHE_TTL > 0 and (item := _cache_get(ref)) is not None:
         return item
     if not _cli_lock.acquire(timeout=LOCK_WAIT):
         raise HTTPException(503, "Relay busy, retry later")
     try:
-        if CACHE_TTL > 0 and (item := _cache_get(title)) is not None:
+        if CACHE_TTL > 0 and (item := _cache_get(ref)) is not None:
             return item  # filled while we waited for the lock
-        rc, out, err = _view(title)
-        if rc not in (0, 124) and ITEM_MISSING not in err and VAULT_MISSING not in err:
-            # Don't gate this on `pass-cli info`: a session whose refresh was never persisted still passes
-            # `info` locally while every API call fails. One re-login is cheap; a stuck relay is not.
-            log.warning("pass-cli failed with a non-definitive error — re-authenticating and retrying once")
-            if not reauthenticate():
-                raise HTTPException(503, "Failed to re-authenticate with Proton Pass")
-            rc, out, err = _view(title)
-        if rc != 0:
-            if rc == 124:
-                raise HTTPException(504, "pass-cli timed out")
-            if ITEM_MISSING in err:
-                raise HTTPException(404, f"Item not found: {title}")
-            if VAULT_MISSING in err:
-                log.error("Configured vault %r not found — check PROTON_PASS_VAULT", VAULT)
-                raise HTTPException(500, "Configured vault not found")
-            raise HTTPException(502, "pass-cli error")
         try:
-            item = json.loads(out)["item"]
-        except (ValueError, KeyError, TypeError):
-            raise HTTPException(502, "Unparseable pass-cli output")
+            item = fetch_item(ref)
+        except CliError as e:
+            if e.timed_out or VAULT_MISSING in e.detail:
+                raise http_error(e)
+            # Expired or broken session. Don't gate this on `pass-cli info`: a session whose refresh
+            # was never persisted still passes `info` while every API call fails.
+            if failed := login():
+                log.error("Session lost (%s); re-login failed: %s", e.short, failed)
+                raise HTTPException(503, "Failed to re-authenticate with Proton Pass")
+            try:
+                item = fetch_item(ref)
+            except CliError as e2:
+                log.error("pass-cli still failing after re-login: %s", e2.detail)
+                raise http_error(e2)
+            log.info("Re-authenticated (%s)", e.short)
     finally:
         _cli_lock.release()
-
-    kind = item_kind(item)
-    if kind not in ALLOWED_TYPES:
-        log.warning("Refused %s item '%s' (type not allowed)", kind, title)
-        raise HTTPException(403, f"Item type {kind} is not served by this relay")
     if CACHE_TTL > 0:
         with _cache_lock:
-            _cache[title] = (time.monotonic() + CACHE_TTL, item)
+            _cache[ref] = (time.monotonic() + CACHE_TTL, item)
     return item
 
 
@@ -320,10 +430,10 @@ async def lifespan(app: FastAPI):
         log.error("Session directory unusable: %s", e)
         sys.exit(1)
     with _cli_lock:
-        if not reauthenticate():
-            log.error("Initial authentication failed — exiting")
+        if failed := login():
+            log.error("Login to Proton Pass failed: %s — exiting", failed)
             sys.exit(1)
-    log.info("=== proton-relay ready ===")
+    log.info("proton-relay ready | vault=%s | types=%s | cache_ttl=%ss", VAULT, sorted(ALLOWED_TYPES), CACHE_TTL)
     yield
 
 
@@ -336,31 +446,44 @@ def verify_token(creds: HTTPAuthorizationCredentials = Security(bearer)) -> None
         raise HTTPException(401, "Unauthorized")
 
 
+def lookup(key: str, with_field: bool) -> tuple[Ref, str | None, dict]:
+    """Parse + fetch, logging refused requests once at WARNING."""
+    try:
+        ref, field = parse_key(key, with_field)
+        return ref, field, get_item(ref)
+    except HTTPException as e:
+        if e.status_code < 500:
+            log.warning("Refused %s: %s", key, e.detail)
+        raise
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
 
+# Ready = the startup login succeeded (uvicorn serves nothing before that). Deliberately NOT "session healthy":
+# an unready pod is dropped from the Service, so with one replica no request would ever arrive to trigger
+# the re-login that heals it. A broken session is handled per request instead (re-login, 503, backoff).
 @app.get("/ready")
-def ready(response: Response):
-    if not _state["ready"]:
-        response.status_code = 503
-    return {"ready": _state["ready"]}
+def ready():
+    return {"ready": True}
 
 
-@app.get("/secret/{item}/{field}", dependencies=[Depends(verify_token)])
-def get_secret(item: str, field: str, response: Response):
+@app.get("/secret/{key:path}", dependencies=[Depends(verify_token)])
+def get_secret(key: str, response: Response):
     response.headers["Cache-Control"] = "no-store"
-    value = get_field(item_fields(get_item(item)), field)
+    ref, field, item = lookup(key, with_field=True)
+    value = get_field(item_fields(item), field)
     if value is None:
-        log.warning("Field '%s' not found in item '%s'", field, item)
-        raise HTTPException(404, f"Field '{field}' not found in item '{item}'")
-    log.info("Served %s/%s", item, field)
+        log.warning("Refused %s: field not found", key)
+        raise HTTPException(404, f"Field '{field}' not found in {ref}")
+    log.info("Served %s", key)
     return {"value": value}
 
 
-@app.get("/fields/{item}", dependencies=[Depends(verify_token)])
-def list_fields(item: str):
-    data = get_item(item)
-    names = list(dict.fromkeys(name for name, _ in item_fields(data)))
-    return {"item": item, "type": item_kind(data), "fields": names}
+@app.get("/fields/{key:path}", dependencies=[Depends(verify_token)])
+def list_fields(key: str):
+    ref, _, item = lookup(key, with_field=False)
+    names = list(dict.fromkeys(name for name, _ in item_fields(item)))
+    return {"item": str(ref), "id": item.get("id"), "type": item_kind(item), "fields": names}

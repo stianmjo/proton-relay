@@ -1,0 +1,29 @@
+{
+  "item": {
+    "id": "item_12",
+    "share_id": "share_homelab",
+    "vault_id": "vault_homelab",
+    "content": {
+      "title": "postgres",
+      "note": "",
+      "item_uuid": "uuid-item_12",
+      "content": {
+        "Login": {
+          "email": "",
+          "username": "user-item_12",
+          "password": "auth-db-pg-PASSWORD",
+          "urls": [],
+          "totp_uri": "",
+          "passkeys": []
+        }
+      },
+      "extra_fields": []
+    },
+    "state": "Active",
+    "flags": [],
+    "create_time": "2026-09-21T14:13:20",
+    "modify_time": "2026-09-21T14:13:20",
+    "folder_id": "folder_db"
+  },
+  "attachments": []
+}
