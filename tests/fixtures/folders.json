@@ -1,0 +1,42 @@
+[
+  {
+    "id": "folder_auth",
+    "share_id": "share_homelab",
+    "parent_folder_id": null,
+    "content": {
+      "name": "authentik"
+    }
+  },
+  {
+    "id": "folder_media",
+    "share_id": "share_homelab",
+    "parent_folder_id": null,
+    "content": {
+      "name": "media"
+    }
+  },
+  {
+    "id": "folder_db",
+    "share_id": "share_homelab",
+    "parent_folder_id": "folder_auth",
+    "content": {
+      "name": "db"
+    }
+  },
+  {
+    "id": "folder_dup1",
+    "share_id": "share_homelab",
+    "parent_folder_id": null,
+    "content": {
+      "name": "dup"
+    }
+  },
+  {
+    "id": "folder_dup2",
+    "share_id": "share_homelab",
+    "parent_folder_id": null,
+    "content": {
+      "name": "dup"
+    }
+  }
+]

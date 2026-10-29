@@ -1,0 +1,28 @@
+{
+  "item": {
+    "id": "item_15",
+    "share_id": "share_homelab",
+    "vault_id": "vault_homelab",
+    "content": {
+      "title": "smtp-relay",
+      "note": "",
+      "item_uuid": "uuid-item_15",
+      "content": {
+        "Login": {
+          "email": "",
+          "username": "user-item_15",
+          "password": "trashed-PASSWORD",
+          "urls": [],
+          "totp_uri": "",
+          "passkeys": []
+        }
+      },
+      "extra_fields": []
+    },
+    "state": "Trashed",
+    "flags": [],
+    "create_time": "2026-09-21T14:13:20",
+    "modify_time": "2026-09-21T14:13:20"
+  },
+  "attachments": []
+}

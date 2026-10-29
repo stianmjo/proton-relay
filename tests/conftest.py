@@ -19,9 +19,8 @@ sys.path.insert(0, str(ROOT))
 
 TOKEN = "test-bridge-token"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
-import shutil as _sh
 # Real pass-cli for integration tests: $PASS_CLI_REAL_BIN, else pass-cli on PATH, else those tests skip.
-REAL_BIN = Path(os.environ.get("PASS_CLI_REAL_BIN") or _sh.which("pass-cli") or "/nonexistent")
+REAL_BIN = Path(os.environ.get("PASS_CLI_REAL_BIN") or shutil.which("pass-cli") or "/nonexistent")
 
 
 def _calls(mdir: Path):
@@ -51,6 +50,7 @@ def mock_env(tmp_path, monkeypatch):
         "BRIDGE_TOKEN": TOKEN,
         "PROTON_PASS_SESSION_DIR": str(session),
         "CACHE_TTL_SECONDS": "0",
+        "LOGIN_BACKOFF_SECONDS": "0",   # backoff has its own tests
         "RUST_BACKTRACE": "1",  # prove the relay forces it off for children
     }
     for k, v in env.items():
