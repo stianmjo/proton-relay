@@ -1,8 +1,8 @@
 FROM python:3.12-slim
 
 # Install pass-cli via direct binary download
-ENV PASS_CLI_VERSION=2.5.1
-ENV PASS_CLI_HASH=40e27645e0485f5f0db928b81469d1c5a7c8968a162956e940069476244c02b1
+ENV PASS_CLI_VERSION=2.6.0
+ENV PASS_CLI_HASH=36e5657688297cff66f66eef1db28528013be5387fecad2200a5cd4a904cb781
 
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && \
     rm -rf /var/lib/apt/lists/* && \
