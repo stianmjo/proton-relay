@@ -7,7 +7,7 @@ Key format (everything after /secret/ or /fields/):
 Folder names and titles match exactly. Field names are case-insensitive. Trashed items are ignored.
 If two items (or two sibling folders) share a name, the key is ambiguous: 409, never a guess.
 
-Targets pass-cli 2.5.x. Upstream behaviour relied on (verified against pass-cli source):
+Targets pass-cli 2.7.x (folder support needs 2.5+). Upstream behaviour relied on (verified against pass-cli source):
   * `item list --output json` prints metadata only (id, title, folder_id, item_type, state), never secrets.
   * `folder list --output json` prints [{id, parent_folder_id, content: {name}}].
   * 2.4.0+ refuses a session dir that is a symlink or has group/other permission bits.
