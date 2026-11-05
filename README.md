@@ -1,29 +1,23 @@
 # proton-relay
 
-Serves secrets from a Proton Pass vault to [External Secrets Operator](https://external-secrets.io) (ESO), using the Proton Pass CLI and a read-only Personal Access Token (PAT).
+Serves secrets from a Proton Pass vault to [External Secrets Operator](https://external-secrets.io) (ESO).
 
 ```
-ExternalSecret -> ESO -> proton-relay -> pass-cli -> Proton Pass -> Kubernetes Secret
+ExternalSecret -> ESO -> proton-relay -> pass-cli -> Proton Pass
 ```
 
-## Requirements
+Needs a paid Proton Pass plan and ESO in the cluster.
 
-- Proton Pass paid plan (the CLI requires it)
-- External Secrets Operator in the cluster
-- pass-cli 2.7.x (pinned in `bridge/Dockerfile`)
+## Install
 
-## Deploy
-
-**1. Vault.** Create a vault in Proton Pass, for example `Kubernetes`.
-
-**2. PAT.** On your own machine:
+**1. Create a vault** in Proton Pass, for example `Kubernetes`, and a read-only token for it:
 
 ```sh
 pass-cli pat create --name "my-cluster-eso" --expiration 1y     # shown once, save it
 pass-cli pat access grant --pat-name "my-cluster-eso" --vault-name "Kubernetes" --role viewer
 ```
 
-**3. Secret.** Apply by hand, never commit it:
+**2. Create the Secret** (never commit it):
 
 ```sh
 read -rsp 'PAT: ' PAT; echo
@@ -34,24 +28,16 @@ unset PAT
 kubectl label secret proton-relay -n external-secrets external-secrets.io/type=webhook
 ```
 
-**4. Relay and store.** Set your vault name in `deploy/deployment.yaml` (`PROTON_PASS_VAULT`), then:
+**3. Deploy.** Set `PROTON_PASS_VAULT` in `deploy/deployment.yaml`, then:
 
 ```sh
-kubectl apply -f deploy/deployment.yaml
-kubectl apply -f deploy/eso-secretstore.yaml
+kubectl apply -f deploy/deployment.yaml -f deploy/eso-secretstore.yaml
 kubectl logs -n external-secrets deploy/proton-relay     # expect: proton-relay ready | vault=...
 ```
 
-## Using secrets
+## Use
 
-Reference a field as `<folder path>/<item title>/<field>`, or by item ID as `id:<ItemID>/<field>`.
-
-| Key | Item |
-|---|---|
-| `postgres/password` | `postgres` at the vault root |
-| `my-app/postgres/password` | `postgres` in folder `my-app` |
-| `my-app/db/postgres/password` | `postgres` in folder `my-app/db` |
-| `id:<ItemID>/password` | the item with that ID, in any folder |
+Reference a field as `<folder path>/<item title>/<field>`, or `id:<ItemID>/<field>`:
 
 ```yaml
 apiVersion: external-secrets.io/v1
@@ -69,61 +55,54 @@ spec:
   data:
     - secretKey: password
       remoteRef:
-        key: "my-app/postgres/password"
+        key: "my-app/postgres/password"     # item "postgres" in folder "my-app"
 ```
 
-More examples: `deploy/externalsecret.yaml.example`.
+- No folder means the vault root: `postgres/password`.
+- Names are case-sensitive, field names are not. Avoid `/` and spaces in names.
+- Two items or folders with the same name in the same place give `409`; use `id:` or rename one.
+- Login, Note and Custom items are served. SSH keys need `ALLOWED_ITEM_TYPES=Login,Note,Custom,SshKey`.
 
-**Rules**
-
-- Folder names and titles are exact and case-sensitive. Field names are case-insensitive.
-- A key without a folder only matches items at the vault root.
-- Keep folder names, titles and fields free of `/` and spaces. A root title can't start with `id:`.
-- Trashed items are ignored.
-- Two items with the same title in the same folder, or two sibling folders with the same name, return `409` with the matching IDs. Rename one or use `id:`.
-
-**Item types**
-
-| Type | Served | Fields |
-|---|---|---|
-| Login | yes | `username` `password` `email` `urls` `url` (first URL) `totp` `totp_uri` |
-| Custom | yes | `<Section>.<field>`, or `<field>` if unique |
-| Note | yes | none extra |
-| SSH key | opt-in (`ALLOWED_ITEM_TYPES`) | `private_key` `public_key` + section fields |
-| Credit card, Wifi, Identity | no (`403`) | |
-
-Every served item also has `title`, `note` and its custom fields. Empty built-in fields return `404`. TOTP fields return the `otpauth://` URI.
-
-**Find an item's ID and field names**
+To list an item's ID and fields:
 
 ```sh
 curl -s -H "Authorization: Bearer <BRIDGE_TOKEN>" \
   http://proton-relay.external-secrets.svc/fields/my-app/postgres
-# {"item": "my-app/postgres", "id": "...", "type": "Login", "fields": ["title", "username", "password"]}
 ```
 
-## API
+More examples: `deploy/externalsecret.yaml.example`.
 
-| Endpoint | Auth | Returns |
-|---|---|---|
-| `GET /health` | none | `200` (liveness) |
-| `GET /ready` | none | `200` after the first login (readiness) |
-| `GET /secret/<key>/<field>` | bearer | `{"value": "..."}` |
-| `GET /fields/<key>` | bearer | `{"item", "id", "type", "fields"}` |
+## Monitoring
 
-| Code | Meaning |
-|---|---|
-| `400` | malformed key |
-| `401` | wrong bearer token |
-| `403` | item type not served |
-| `404` | folder, item or field not found |
-| `409` | ambiguous key |
-| `500` | vault not found |
-| `502` | pass-cli error |
-| `503` | re-login failed, backing off, or relay busy |
-| `504` | pass-cli timed out |
+Don't point a monitor at port 8080: that port also serves secrets. Add the health-only sidecar instead, and lock the relay down with NetworkPolicies:
 
-## Configuration
+```sh
+kubectl apply -f deploy/health-proxy.yaml.example        # then add the sidecar, see the comments in the file
+kubectl apply -f deploy/networkpolicy.yaml.example       # set your monitor's namespace and labels first
+```
+
+- Monitor URL: `http://proton-relay.external-secrets.svc:8081/health` (or `/ready`)
+- 8080 accepts only the ESO controller, 8081 accepts only the monitor, and outbound traffic is DNS plus HTTPS to the internet.
+- If the namespace has an allow-same-namespace policy, exclude `app: proton-relay` from it.
+
+Check from the monitor pod: `:8081/health` returns `200`, and `proton-relay.external-secrets.svc:80` times out.
+
+## Updating
+
+- **pass-cli:** a weekly workflow opens a PR. Approve the workflow run, merge, then publish a patch release.
+- **PAT:** renew about two weeks before it expires:
+
+  ```sh
+  pass-cli pat renew --pat-name "my-cluster-eso" --expiration 1y
+  read -rsp 'New PAT: ' PAT; echo
+  kubectl patch secret proton-relay -n external-secrets --type=json \
+    -p="[{\"op\":\"replace\",\"path\":\"/data/PROTON_PASS_PERSONAL_ACCESS_TOKEN\",\"value\":\"$(printf %s "$PAT" | base64 -w0)\"}]"
+  unset PAT
+  kubectl rollout restart deploy/proton-relay -n external-secrets
+  ```
+
+<details>
+<summary>Configuration</summary>
 
 | Variable | Default | Description |
 |---|---|---|
@@ -134,71 +113,27 @@ curl -s -H "Authorization: Bearer <BRIDGE_TOKEN>" \
 | `CACHE_TTL_SECONDS` | `60` | Per-item cache, `0` disables |
 | `PASS_CLI_TIMEOUT_SECONDS` | `60` | Max time for one pass-cli call |
 | `LOCK_WAIT_SECONDS` | `90` | Max queue time before `503` |
-| `LOGIN_BACKOFF_SECONDS` | `300` | Wait after a failed re-login before trying again |
-| `PROTON_PASS_SESSION_DIR` | `~/.local/share/proton-pass-cli` | pass-cli session directory |
+| `LOGIN_BACKOFF_SECONDS` | `300` | Wait after a failed re-login |
 | `LOG_LEVEL` | `INFO` | `DEBUG` shows pass-cli error details |
 
-## Operations
+</details>
 
-**Sessions.** Proton sessions expire every few hours. The relay logs in again and retries the request once, so ESO never notices. If the login fails, requests get `503` and the relay waits `LOGIN_BACKOFF_SECONDS` before the next login, to stay under Proton's login rate limit.
+<details>
+<summary>API and status codes</summary>
 
-**Readiness.** The pod is ready after its first login and stays ready. A pod that turned unready would be removed from the Service, and no request could reach it to trigger the login that fixes it.
+| Endpoint | Auth | Returns |
+|---|---|---|
+| `GET /health` | none | `200` (liveness) |
+| `GET /ready` | none | `200` after the first login |
+| `GET /secret/<key>/<field>` | bearer | `{"value": "..."}` |
+| `GET /fields/<key>` | bearer | `{"item", "id", "type", "fields"}` |
 
-**Logs.** One line per event. A healthy relay logs only `Served ...` and `Re-authenticated (...)`.
+`400` malformed key · `401` wrong token · `403` item type not served · `404` not found · `409` ambiguous key · `502` pass-cli error · `503` login failed or busy · `504` pass-cli timed out
 
-| Level | Meaning |
-|---|---|
-| `INFO` | normal operation |
-| `WARNING` | a request was refused, fix the ExternalSecret or the vault |
-| `ERROR` | the relay can't reach Proton Pass |
+</details>
 
-**Session directory.** Mount an `emptyDir` at `/session` (see `deploy/deployment.yaml`). pass-cli refuses symlinks and group/other permissions; the relay fixes permissions at startup. Never mount it from a Secret or ConfigMap.
-
-**Health monitoring.** The relay serves `/health` and `/ready` on the same port (8080) as the secret API, so allowing a monitor to 8080 also gives it a network path to `/secret`. Instead, run the nginx sidecar from `deploy/health-proxy.yaml.example`. It listens on 8081, passes only `GET /health` and `GET /ready` to the relay, returns `404` for everything else, and logs failed checks plus about one successful check an hour. Point the monitor (for example Uptime Kuma) at `http://proton-relay.external-secrets.svc:8081/health`. The kubelet probes keep using 8080, since they are not affected by NetworkPolicies.
-
-**NetworkPolicies.** `deploy/networkpolicy.yaml.example` locks the relay down:
-
-| Direction | Allowed |
-|---|---|
-| Ingress 8080 (secret API) | ESO controller pods (`app.kubernetes.io/name: external-secrets`) only |
-| Ingress 8081 (health sidecar) | the monitor's pods only (namespace + pod selector) |
-| Egress | DNS to kube-dns, TCP 443 to the internet (private, CGNAT and link-local ranges excluded; Proton has no stable IPs) |
-
-Adjust the monitor's namespace and labels to match yours. If the namespace has a default-deny policy plus an allow-same-namespace rule, exclude `app: proton-relay` from that rule, or every pod in the namespace can reach 8080. Check from the monitor pod: `:8081/health` should return `200`, while `:80/health` (the Service port for 8080) should time out.
-
-**Throughput.** pass-cli calls run one at a time, since parallel calls on one session sign each other out. Keep the cache on.
-
-## Security
-
-- The PAT is read-only and scoped to one vault
-- Credit card, Wifi and Identity items are refused before their contents are read
-- Requested titles and folder names never reach the pass-cli command line
-- Every request needs the bearer token (constant-time compare)
-- Secret values are never logged
-- Responses send `Cache-Control: no-store`; OpenAPI docs are off
-- The pod runs as non-root with a read-only root filesystem, no capabilities and no service-account token
-
-## PAT rotation
-
-PATs expire. Renew about two weeks before:
-
-```sh
-pass-cli pat renew --pat-name "my-cluster-eso" --expiration 1y
-read -rsp 'New PAT: ' PAT; echo
-kubectl patch secret proton-relay -n external-secrets --type=json \
-  -p="[{\"op\":\"replace\",\"path\":\"/data/PROTON_PASS_PERSONAL_ACCESS_TOKEN\",\"value\":\"$(printf %s "$PAT" | base64 -w0)\"}]"
-unset PAT
-kubectl rollout restart deploy/proton-relay -n external-secrets
-```
-
-## Updating pass-cli
-
-1. The weekly `pass-cli-update` workflow opens a PR with the new version and hash.
-2. Click **Approve workflows to run** so the tests run against the new binary.
-3. Check the pass-cli changelog, then merge.
-4. Publish a release (patch for a pass-cli-only update). The release runs the tests, then builds and pushes the image.
-
-## Development
+<details>
+<summary>Development</summary>
 
 ```sh
 python3 -m venv .venv && source .venv/bin/activate
@@ -206,4 +141,6 @@ pip install -r requirements-dev.txt
 pytest tests -q
 ```
 
-The tests use a mock pass-cli with fixtures in `tests/fixtures/`, so they need no PAT or network. Tests against the real binary run when `pass-cli` 2.5+ is on `PATH` or `PASS_CLI_REAL_BIN` is set. CI runs the suite on every pull request and before every release.
+The tests use a mock pass-cli (`tests/mock_pass_cli.py`, fixtures in `tests/fixtures/`), so they need no PAT or network. Tests against the real binary also run when `pass-cli` 2.5+ is on `PATH`.
+
+</details>
