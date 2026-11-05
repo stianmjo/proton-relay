@@ -10,7 +10,7 @@ ExternalSecret -> ESO -> proton-relay -> pass-cli -> Proton Pass -> Kubernetes S
 
 - Proton Pass paid plan (the CLI requires it)
 - External Secrets Operator in the cluster
-- pass-cli 2.5.x (pinned in `bridge/Dockerfile`)
+- pass-cli 2.7.x (pinned in `bridge/Dockerfile`)
 
 ## Deploy
 
@@ -153,6 +153,18 @@ curl -s -H "Authorization: Bearer <BRIDGE_TOKEN>" \
 | `ERROR` | the relay can't reach Proton Pass |
 
 **Session directory.** Mount an `emptyDir` at `/session` (see `deploy/deployment.yaml`). pass-cli refuses symlinks and group/other permissions; the relay fixes permissions at startup. Never mount it from a Secret or ConfigMap.
+
+**Health monitoring.** The relay serves `/health` and `/ready` on the same port (8080) as the secret API, so allowing a monitor to 8080 also gives it a network path to `/secret`. Instead, run the nginx sidecar from `deploy/health-proxy.yaml.example`. It listens on 8081, passes only `GET /health` and `GET /ready` to the relay, returns `404` for everything else, and logs failed checks plus about one successful check an hour. Point the monitor (for example Uptime Kuma) at `http://proton-relay.external-secrets.svc:8081/health`. The kubelet probes keep using 8080, since they are not affected by NetworkPolicies.
+
+**NetworkPolicies.** `deploy/networkpolicy.yaml.example` locks the relay down:
+
+| Direction | Allowed |
+|---|---|
+| Ingress 8080 (secret API) | ESO controller pods (`app.kubernetes.io/name: external-secrets`) only |
+| Ingress 8081 (health sidecar) | the monitor's pods only (namespace + pod selector) |
+| Egress | DNS to kube-dns, TCP 443 to the internet (private, CGNAT and link-local ranges excluded; Proton has no stable IPs) |
+
+Adjust the monitor's namespace and labels to match yours. If the namespace has a default-deny policy plus an allow-same-namespace rule, exclude `app: proton-relay` from that rule, or every pod in the namespace can reach 8080. Check from the monitor pod: `:8081/health` should return `200`, while `:80/health` (the Service port for 8080) should time out.
 
 **Throughput.** pass-cli calls run one at a time, since parallel calls on one session sign each other out. Keep the cache on.
 

@@ -1,0 +1,97 @@
+# Health-only nginx sidecar: exposes GET /health and /ready on 8081 so a monitor
+# can be allowed to that port without a network path to the secret API on 8080.
+#
+# 1. Apply this ConfigMap.
+# 2. Add to deploy/deployment.yaml, under spec.template.spec.containers:
+#
+#        - name: health-proxy
+#          image: nginxinc/nginx-unprivileged:1.31.7-alpine
+#          ports:
+#            - name: health
+#              containerPort: 8081
+#          env:
+#            - name: NGINX_ENTRYPOINT_QUIET_LOGS
+#              value: "1"
+#          securityContext:
+#            allowPrivilegeEscalation: false
+#            readOnlyRootFilesystem: true
+#            capabilities:
+#              drop: ["ALL"]
+#          volumeMounts:
+#            - name: health-proxy-conf
+#              mountPath: /etc/nginx/nginx.conf
+#              subPath: nginx.conf
+#              readOnly: true
+#            - name: health-proxy-tmp
+#              mountPath: /tmp
+#          livenessProbe:
+#            tcpSocket:
+#              port: 8081
+#            periodSeconds: 30
+#          resources:
+#            requests: { cpu: 5m, memory: 8Mi }
+#            limits:   { cpu: 50m, memory: 32Mi }
+#
+#    under spec.template.spec.volumes:
+#
+#        - name: health-proxy-conf
+#          configMap:
+#            name: proton-relay-health-proxy
+#        - name: health-proxy-tmp
+#          emptyDir:
+#            sizeLimit: 8Mi
+#
+#    and to the Service's ports:
+#
+#        - name: health
+#          port: 8081
+#          targetPort: 8081
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: proton-relay-health-proxy
+  namespace: external-secrets
+data:
+  nginx.conf: |
+    worker_processes 1;
+    error_log /dev/stderr warn;
+    pid /tmp/nginx.pid;
+
+    events {
+      worker_connections 64;
+    }
+
+    http {
+      client_body_temp_path /tmp/client_temp;
+      proxy_temp_path       /tmp/proxy_temp;
+      fastcgi_temp_path     /tmp/fastcgi_temp;
+      uwsgi_temp_path       /tmp/uwsgi_temp;
+      scgi_temp_path        /tmp/scgi_temp;
+      server_tokens off;
+
+      # Log every failed or unexpected request; successful checks only during
+      # minute :00, so a healthy relay leaves about one line an hour.
+      map "$status $time_iso8601" $loggable {
+        "~^[23]\d\d \S+T\d\d:00:" 1;
+        "~^[23]"                  0;
+        default                   1;
+      }
+      log_format health '$time_iso8601 $status $request_method $uri ${request_time}s';
+      access_log /dev/stdout health if=$loggable;
+
+      server {
+        listen 8081;
+
+        location = /health {
+          limit_except GET { deny all; }
+          proxy_pass http://127.0.0.1:8080/health;
+        }
+        location = /ready {
+          limit_except GET { deny all; }
+          proxy_pass http://127.0.0.1:8080/ready;
+        }
+        location / {
+          return 404;
+        }
+      }
+    }
